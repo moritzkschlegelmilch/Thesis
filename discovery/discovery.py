@@ -1,45 +1,44 @@
+from abc import ABC
 from math import sqrt
 
+from .Scorable import DataSource
 from .ilp import solve
 from .totem import totemDiscovery
 
 
-class ProcessAreaDiscovery:
+class ProcessAreaDiscoveryFramework(ABC):
 
-    def __init__(self, ocel):
-        self.temporal_relations = None
-        self.scores_push: dict[tuple[str, str], int] = dict()
-        self.scores_pull: dict[tuple[str, str], int] = dict()
+    def __init__(self, ocel, data_sources: list[DataSource]):
+        self.data_sources = data_sources
+        self.scores_push: dict[tuple[str, str], float] = dict()
+        self.scores_pull: dict[tuple[str, str], float] = dict()
         self.ocel = ocel
 
+        self.overall_weight: int = 0
+        for data_source in self.data_sources:
+            self.overall_weight += data_source.weight()
+
     def prepare(self):
-        self.temporal_relations = totemDiscovery(self.ocel)
+        for data_source in self.data_sources:
+            data_source.prepare(self.ocel)
 
     def assign_scores(self):
         for o_1 in self.ocel.object_types:
             for o_2 in self.ocel.object_types:
-                self.scores_push[o_1, o_2] = self.assign_score_push(o_1, o_2)
-                self.scores_pull[o_1, o_2] = self.assign_score_pull(o_1, o_2)
+                score_push: float = 0
+                score_pull: float = 0
 
-    def assign_score_push(self, o_1, o_2):
-        temp_r = self.temporal_relations[o_1, o_2]
-        if "total" not in temp_r or temp_r["total"] == 0:
-            return 0
+                for data_source in self.data_sources:
+                    score_push += data_source.assign_score_push(o_1, o_2)
+                    score_pull += data_source.assign_score_pull(o_1, o_2)
 
-        temp_r.setdefault("Di", 0)
-        temp_r.setdefault("D", 0)
-
-        return (temp_r["Di"] - temp_r["D"]) / temp_r["total"]
-
-    def assign_score_pull(self, o_1, o_2):
-        temp_r = self.temporal_relations[o_1, o_2]
-        if "total" not in temp_r or temp_r["total"] == 0:
-            return 0
-
-        temp_r.setdefault("Ii", 0)
-        temp_r.setdefault("I", 0)
-
-        return (temp_r["Ii"] + temp_r["I"]) / temp_r["total"]
+                self.scores_pull[o_1, o_2] = score_pull / self.overall_weight
+                self.scores_push[o_1, o_2] = score_push / self.overall_weight
 
     def solve_ilp(self):
         solve(self.ocel.object_types, self.scores_push, self.scores_pull, 0)
+
+    def run(self):
+        self.prepare()
+        self.assign_scores()
+        self.solve_ilp()
