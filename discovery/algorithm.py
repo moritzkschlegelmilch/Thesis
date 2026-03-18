@@ -5,5 +5,5 @@ from repo.discovery.discovery import ProcessAreaDiscoveryFramework
 class ProcessAreaDiscovery(ProcessAreaDiscoveryFramework):
     def __init__(self, ocel):
         super().__init__(ocel, [
-            TotemDatasource(1)
+            TotemDatasource(1, 1),
         ])

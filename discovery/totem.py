@@ -60,116 +60,7 @@ class Totem:
         self.object_type_to_event_types = object_type_to_event_types
 
 def get_all_event_objects(ocel, event_id):
-    # obj_ids = []
-    # for obj_type in ocel.object_types:
-    #     obj_ids += ocel.get_value(event_id, obj_type)
-    # return obj_ids
     return ocel.get_value(event_id, "event_objects")
-
-
-def get_most_precise_lc(directed_type_tuple, tau, log_cardinalities):
-    total = 0
-    if (
-        directed_type_tuple in log_cardinalities.keys()
-        and LC_TOTAL in log_cardinalities[directed_type_tuple].keys()
-    ):
-        total = log_cardinalities[directed_type_tuple][LC_TOTAL]
-
-    if total == 0:
-        return "ERROR 0"
-
-    if (LC_ZERO in log_cardinalities[directed_type_tuple].keys()) and (
-        (log_cardinalities[directed_type_tuple][LC_ZERO] / total) >= tau
-    ):
-        return LC_ZERO
-    if (LC_ONE in log_cardinalities[directed_type_tuple].keys()) and (
-        (log_cardinalities[directed_type_tuple][LC_ONE] / total) >= tau
-    ):
-        return LC_ONE
-    if (LC_ZERO_ONE in log_cardinalities[directed_type_tuple].keys()) and (
-        (log_cardinalities[directed_type_tuple][LC_ZERO_ONE] / total) >= tau
-    ):
-        return LC_ZERO_ONE
-    if (LC_MANY in log_cardinalities[directed_type_tuple].keys()) and (
-        (log_cardinalities[directed_type_tuple][LC_MANY] / total) >= tau
-    ):
-        return LC_MANY
-    if (LC_ZERO_MANY in log_cardinalities[directed_type_tuple].keys()) and (
-        (log_cardinalities[directed_type_tuple][LC_ZERO_MANY] / total) >= tau
-    ):
-        return LC_ZERO_MANY
-
-    return "None"
-
-
-def get_most_precise_ec(directed_type_tuple, tau, event_cardinalities):
-    total = 0
-    if (
-        directed_type_tuple in event_cardinalities.keys()
-        and EC_TOTAL in event_cardinalities[directed_type_tuple].keys()
-    ):
-        total = event_cardinalities[directed_type_tuple][EC_TOTAL]
-
-    if total == 0:
-        return "ERROR 0"
-
-    if (EC_ZERO in event_cardinalities[directed_type_tuple].keys()) and (
-        (event_cardinalities[directed_type_tuple][EC_ZERO] / total) >= tau
-    ):
-        return EC_ZERO
-    if (EC_ONE in event_cardinalities[directed_type_tuple].keys()) and (
-        (event_cardinalities[directed_type_tuple][EC_ONE] / total) >= tau
-    ):
-        return EC_ONE
-    if (EC_ZERO_ONE in event_cardinalities[directed_type_tuple].keys()) and (
-        (event_cardinalities[directed_type_tuple][EC_ZERO_ONE] / total) >= tau
-    ):
-        return EC_ZERO_ONE
-    if (EC_MANY in event_cardinalities[directed_type_tuple].keys()) and (
-        (event_cardinalities[directed_type_tuple][EC_MANY] / total) >= tau
-    ):
-        return EC_MANY
-    if (EC_ZERO_MANY in event_cardinalities[directed_type_tuple].keys()) and (
-        (event_cardinalities[directed_type_tuple][EC_ZERO_MANY] / total) >= tau
-    ):
-        return EC_ZERO_MANY
-
-    return "None"
-
-
-def get_most_precise_tr(directed_type_tuple, tau, temporal_relation):
-    total = 0
-    if (
-        directed_type_tuple in temporal_relation.keys()
-        and EC_TOTAL in temporal_relation[directed_type_tuple].keys()
-    ):
-        total = temporal_relation[directed_type_tuple][EC_TOTAL]
-
-    if total == 0:
-        return "ERROR 0"
-
-    if (TR_DEPENDENT in temporal_relation[directed_type_tuple].keys()) and (
-        (temporal_relation[directed_type_tuple][TR_DEPENDENT] / total) >= tau
-    ):
-        return TR_DEPENDENT
-    if (TR_DEPENDENT_INVERSE in temporal_relation[directed_type_tuple].keys()) and (
-        (temporal_relation[directed_type_tuple][TR_DEPENDENT_INVERSE] / total) >= tau
-    ):
-        return TR_DEPENDENT_INVERSE
-    if (TR_INITIATING in temporal_relation[directed_type_tuple].keys()) and (
-        (temporal_relation[directed_type_tuple][TR_INITIATING] / total) >= tau
-    ):
-        return TR_INITIATING
-    if (TR_INITIATING_REVERSE in temporal_relation[directed_type_tuple].keys()) and (
-        (temporal_relation[directed_type_tuple][TR_INITIATING_REVERSE] / total) >= tau
-    ):
-        return TR_INITIATING_REVERSE
-    if (TR_PARALLEL in temporal_relation[directed_type_tuple].keys()) and (
-        (temporal_relation[directed_type_tuple][TR_PARALLEL] / total) >= tau
-    ):
-        return TR_PARALLEL
-
-    return "None"
 def totemDiscovery(ocel, tau=0.9):
     """
     Given an Object Centric Event Log, compute the temporal graph and related information.
@@ -332,16 +223,27 @@ def totemDiscovery(ocel, tau=0.9):
                         ] += 1
 
     for source_o, target_o in ocel.o2o_graph_edges:
+        type_of_source_o = None
         type_of_target_o = None
+
         for type in ocel.object_types:
-            if target_o in type_to_object[type]:
+            if source_o in type_to_object.get(type, set()):
+                type_of_source_o = type
+            if target_o in type_to_object.get(type, set()):
                 type_of_target_o = type
-                break
-        if type_of_target_o == None:
+
+        if type_of_source_o is None or type_of_target_o is None:
             continue
+
+        # forward direction
         o2o.setdefault(source_o, dict())
         o2o[source_o].setdefault(type_of_target_o, set())
-        o2o[source_o][type_of_target_o].update([source_o])
+        o2o[source_o][type_of_target_o].add(target_o)
+
+        # reverse direction: enforce symmetric closure
+        o2o.setdefault(target_o, dict())
+        o2o[target_o].setdefault(type_of_source_o, set())
+        o2o[target_o][type_of_source_o].add(source_o)
 
     for type_source in ocel.object_types:
         for type_target in ocel.object_types:
@@ -463,22 +365,4 @@ def totemDiscovery(ocel, tau=0.9):
                     )
                     h_temporal_relations[(type_source, type_target)][TR_PARALLEL] += 1
 
-    cardinalities = {}
-
-    # for each connection give the 6 relations
-    for connected_types in type_relations:
-        t1, t2 = connected_types
-        # get log cardinality
-        lc = get_most_precise_lc((t1, t2), tau, h_log_cardinalities)
-        lc_i = get_most_precise_lc((t2, t1), tau, h_log_cardinalities)
-        # get event cardinality
-        ec = get_most_precise_ec((t1, t2), tau, h_event_cardinalities)
-        ec_i = get_most_precise_ec((t2, t1), tau, h_event_cardinalities)
-        # get temporal relation
-        tr = get_most_precise_tr((t1, t2), tau, h_temporal_relations)
-        tr_i = get_most_precise_tr((t2, t1), tau, h_temporal_relations)
-
-        cardinalities[(t1, t2)] = {"LC": lc, "EC": ec}
-        cardinalities[(t2, t1)] = {"LC": lc_i, "EC": ec_i}
-
-    return h_temporal_relations
+    return h_temporal_relations, h_log_cardinalities

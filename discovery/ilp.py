@@ -24,9 +24,9 @@ def solve(types, scores_push, scores_pull, tau):
                 prob += pull_abs[(ot1, ot2)] >= -expr_pull
 
     prob += (
-            lpSum(push_abs[(ot1, ot2)] for ot1 in types for ot2 in types if scores_push[ot1, ot2] > 0)
+            lpSum(push_abs[(ot1, ot2)] for ot1 in types for ot2 in types if (ot1, ot2) in push_abs)
             +
-            lpSum(pull_abs[(ot1, ot2)] for ot1 in types for ot2 in types if scores_pull[ot1, ot2] > 0)
+            lpSum(pull_abs[(ot1, ot2)] for ot1 in types for ot2 in types if (ot1, ot2) in pull_abs)
     )
 
     for ot1 in types:
