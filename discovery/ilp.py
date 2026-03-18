@@ -1,51 +1,51 @@
-from pulp import LpProblem, LpVariable, LpMaximize, LpInteger, value, LpMinimize, lpSum, LpStatus
+from pulp import LpProblem, LpVariable, LpMaximize, LpInteger, value, LpMinimize, lpSum, LpStatus, PULP_CBC_CMD
 
 
-def solve(types, scores_push, scores_pull, tau):
-    prob = LpProblem("variable_size_model", LpMinimize)
+def solve(types, scores_push, scores_pull, K=None,
+                      alpha=1.4, beta=1.0, margin_scale=0.5, verbose=True):
+    if K is None:
+        K = len(types)
 
-    x = LpVariable.dicts("ot", types, lowBound=0, cat="Integer")
+    prob = LpProblem("layered_hierarchy_margin", LpMinimize)
+    z = LpVariable.dicts("layer", types, lowBound=1, upBound=K, cat=LpInteger)
 
-    push_abs = {}
-    pull_abs = {}
+    abs_diff = {}
+    hinge = {}
 
-    for ot1 in types:
-        for ot2 in types:
-            if scores_push[ot1, ot2] > 0:
-                expr_push = (x[ot1] - x[ot2]) - (scores_push[ot1, ot2] * x[ot1])
-                push_abs[(ot1, ot2)] = LpVariable(f"push_abs_{ot1}_{ot2}", lowBound=0)
-                prob += push_abs[(ot1, ot2)] >= expr_push
-                prob += push_abs[(ot1, ot2)] >= -expr_push
+    for idx_i, i in enumerate(types):
+        for j in types[idx_i + 1:]:
+            p_ij = scores_pull.get((i, j), 0.0)
+            if p_ij > 0:
+                abs_diff[(i, j)] = LpVariable(f"absdiff_{i}_{j}", lowBound=0)
+                prob += abs_diff[(i, j)] >= z[i] - z[j]
+                prob += abs_diff[(i, j)] >= z[j] - z[i]
 
-            if scores_pull[ot1, ot2] > 0:
-                expr_pull = (x[ot1] - x[ot2]) - (1 - (scores_pull[ot1, ot2] * x[ot1]))
-                pull_abs[(ot1, ot2)] = LpVariable(f"pull_abs_{ot1}_{ot2}", lowBound=0)
-                prob += pull_abs[(ot1, ot2)] >= expr_pull
-                prob += pull_abs[(ot1, ot2)] >= -expr_pull
+    for i in types:
+        for j in types:
+            if i == j:
+                continue
+            s_ij_raw = scores_push.get((i, j), 0.0)
+            s_ij = max(0.0, s_ij_raw)
+            if s_ij > 0:
+                m_ij = 1.0 + margin_scale * s_ij
+                hinge[(i, j)] = LpVariable(f"hinge_{i}_{j}", lowBound=0)
+                prob += hinge[(i, j)] >= m_ij - z[i] + z[j]
 
     prob += (
-            lpSum(push_abs[(ot1, ot2)] for ot1 in types for ot2 in types if (ot1, ot2) in push_abs)
-            +
-            lpSum(pull_abs[(ot1, ot2)] for ot1 in types for ot2 in types if (ot1, ot2) in pull_abs)
+        alpha * lpSum(scores_pull[(i, j)] * abs_diff[(i, j)]
+                      for (i, j) in abs_diff)
+        +
+        beta * lpSum(max(0.0, scores_push[(i, j)]) * hinge[(i, j)]
+                     for (i, j) in hinge)
     )
 
-    for ot1 in types:
-        for ot2 in types:
-            if scores_pull[ot1, ot2] > 0:
-                print(ot1, ot2, scores_pull[ot1, ot2])
+    status = prob.solve(PULP_CBC_CMD(msg=0))
+    solution = {i: int(round(value(z[i]))) for i in types}
 
+    if verbose:
+        print("Status:", LpStatus[status])
+        print("Objective:", value(prob.objective))
+        for i in types:
+            print(i, solution[i])
 
-    # TODO optimize
-    for ot_1 in types:
-        for ot_2 in types:
-            if scores_push[ot_1, ot_2] > tau:
-                prob += x[ot_1] - x[ot_2] >= 1
-    for ot_ in types:
-        prob += x[ot_] <= len(types)
-
-    status = prob.solve()
-
-    print("Status:", LpStatus[status])
-    print("Objective:", value(prob.objective))
-    for v in prob.variables():
-        print(v.name, "=", value(v))
+    return solution

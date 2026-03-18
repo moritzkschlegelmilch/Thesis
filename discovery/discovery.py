@@ -36,7 +36,7 @@ class ProcessAreaDiscoveryFramework(ABC):
                 self.scores_push[o_1, o_2] = score_push / self.overall_weight
 
     def solve_ilp(self):
-        solve(self.ocel.object_types, self.scores_push, self.scores_pull, 0)
+        solve(self.ocel.object_types, self.scores_push, self.scores_pull)
 
     def run(self):
         self.prepare()
