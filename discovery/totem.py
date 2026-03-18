@@ -8,56 +8,14 @@ from pathlib import Path
 
 TR_TOTAL = "total"
 TR_DEPENDENT = "D"
-TR_DEPENDENT_INVERSE = "Di"
 TR_INITIATING = "I"
-TR_INITIATING_REVERSE = "Ii"
-TR_PARALLEL = "P"
-
-# Event cardinality constants
-EC_TOTAL = "total"
-EC_ZERO = "0"
-EC_ONE = "1"
-EC_ZERO_ONE = "0...1"
-EC_MANY = "1..*"
-EC_ZERO_MANY = "0...*"
 
 # Event cardinality constants
 LC_TOTAL = "total"
-LC_ZERO = "0"
 LC_ONE = "1"
-LC_ZERO_ONE = "0...1"
 LC_MANY = "1..*"
-LC_ZERO_MANY = "0...*"
 
 DATEFORMAT = "%Y-%m-%d %H:%M:%S"
-
-
-class Totem:
-    """
-    A class to represent the temporal graph and related information mined from an Object Centric Event Log using the totemDiscovery algorithm.
-    """
-
-    def __init__(
-        self,
-        tempgraph: Dict,
-        cardinalities: Dict,
-        type_relations: Set[Set[str]],
-        all_event_types: Set[str],
-        object_type_to_event_types: Dict[str, Set[str]],
-    ):
-        """
-        Initialize the Totem object with the temporal graph and related information.
-        :param tempgraph: A dictionary representing the temporal graph with nodes and edges categorized by temporal relations.
-        :param type_relations: A set of sets representing all connected object type pairs.
-        :param all_event_types: A set of all event types present in the Object Centric Event Log.
-        :param object_type_to_event_types: A dictionary mapping each object type to the set of event types associated with it.
-        """
-        # Attributes output by totemDiscovery and used by mlpaDiscovery
-        self.tempgraph = tempgraph
-        self.cardinalities = cardinalities
-        self.type_relations = type_relations
-        self.all_event_types = all_event_types
-        self.object_type_to_event_types = object_type_to_event_types
 
 def get_all_event_objects(ocel, event_id):
     return ocel.get_value(event_id, "event_objects")
@@ -158,69 +116,6 @@ def totemDiscovery(ocel, tau=0.9):
                 for t2 in involved_types:
                     if t1 != t2:
                         type_relations.add(frozenset({t1, t2}))
-            # for all type pairs determine
-            for type_source in involved_types:
-                for type_target in ocel.object_types:
-                    # add one to total
-                    h_event_cardinalities.setdefault((type_source, type_target), dict())
-                    h_event_cardinalities[(type_source, type_target)].setdefault(
-                        EC_TOTAL, 0
-                    )
-                    h_event_cardinalities[(type_source, type_target)][EC_TOTAL] += 1
-                    # determine cardinality
-                    cardinality = 0
-                    if type_target in obj_count_per_type.keys():
-                        cardinality = obj_count_per_type[type_target]
-                    # add one to matching cardinalities
-                    if cardinality == 0:
-                        h_event_cardinalities[(type_source, type_target)].setdefault(
-                            EC_ZERO, 0
-                        )
-                        h_event_cardinalities[(type_source, type_target)][EC_ZERO] += 1
-                        h_event_cardinalities[(type_source, type_target)].setdefault(
-                            EC_ZERO_ONE, 0
-                        )
-                        h_event_cardinalities[(type_source, type_target)][
-                            EC_ZERO_ONE
-                        ] += 1
-                        h_event_cardinalities[(type_source, type_target)].setdefault(
-                            EC_ZERO_MANY, 0
-                        )
-                        h_event_cardinalities[(type_source, type_target)][
-                            EC_ZERO_MANY
-                        ] += 1
-                    elif cardinality == 1:
-                        h_event_cardinalities[(type_source, type_target)].setdefault(
-                            EC_ONE, 0
-                        )
-                        h_event_cardinalities[(type_source, type_target)][EC_ONE] += 1
-                        h_event_cardinalities[(type_source, type_target)].setdefault(
-                            EC_ZERO_ONE, 0
-                        )
-                        h_event_cardinalities[(type_source, type_target)][
-                            EC_ZERO_ONE
-                        ] += 1
-                        h_event_cardinalities[(type_source, type_target)].setdefault(
-                            EC_MANY, 0
-                        )
-                        h_event_cardinalities[(type_source, type_target)][EC_MANY] += 1
-                        h_event_cardinalities[(type_source, type_target)].setdefault(
-                            EC_ZERO_MANY, 0
-                        )
-                        h_event_cardinalities[(type_source, type_target)][
-                            EC_ZERO_MANY
-                        ] += 1
-                    elif cardinality > 1:
-                        h_event_cardinalities[(type_source, type_target)].setdefault(
-                            EC_MANY, 0
-                        )
-                        h_event_cardinalities[(type_source, type_target)][EC_MANY] += 1
-                        h_event_cardinalities[(type_source, type_target)].setdefault(
-                            EC_ZERO_MANY, 0
-                        )
-                        h_event_cardinalities[(type_source, type_target)][
-                            EC_ZERO_MANY
-                        ] += 1
 
     for source_o, target_o in ocel.o2o_graph_edges:
         type_of_source_o = None
@@ -254,47 +149,16 @@ def totemDiscovery(ocel, tau=0.9):
                 h_log_cardinalities[(type_source, type_target)][LC_TOTAL] += 1
 
                 cardinality = len(o2o[obj][type_target])
-
-                if cardinality == 0:
-                    h_log_cardinalities[(type_source, type_target)].setdefault(
-                        LC_ZERO, 0
-                    )
-                    h_log_cardinalities[(type_source, type_target)][LC_ZERO] += 1
-                    h_log_cardinalities[(type_source, type_target)].setdefault(
-                        LC_ZERO_ONE, 0
-                    )
-                    h_log_cardinalities[(type_source, type_target)][LC_ZERO_ONE] += 1
-                    h_log_cardinalities[(type_source, type_target)].setdefault(
-                        LC_ZERO_MANY, 0
-                    )
-                    h_log_cardinalities[(type_source, type_target)][LC_ZERO_MANY] += 1
-                elif cardinality == 1:
+                if cardinality == 1:
                     h_log_cardinalities[(type_source, type_target)].setdefault(
                         LC_ONE, 0
                     )
                     h_log_cardinalities[(type_source, type_target)][LC_ONE] += 1
-                    h_log_cardinalities[(type_source, type_target)].setdefault(
-                        LC_ZERO_ONE, 0
-                    )
-                    h_log_cardinalities[(type_source, type_target)][LC_ZERO_ONE] += 1
-                    h_log_cardinalities[(type_source, type_target)].setdefault(
-                        LC_MANY, 0
-                    )
-                    h_log_cardinalities[(type_source, type_target)][LC_MANY] += 1
-                    h_log_cardinalities[(type_source, type_target)].setdefault(
-                        LC_ZERO_MANY, 0
-                    )
-                    h_log_cardinalities[(type_source, type_target)][LC_ZERO_MANY] += 1
                 elif cardinality > 1:
                     h_log_cardinalities[(type_source, type_target)].setdefault(
                         LC_MANY, 0
                     )
                     h_log_cardinalities[(type_source, type_target)][LC_MANY] += 1
-                    h_log_cardinalities[(type_source, type_target)].setdefault(
-                        LC_ZERO_MANY, 0
-                    )
-                    h_log_cardinalities[(type_source, type_target)][LC_ZERO_MANY] += 1
-
                 # compute temporal relations
                 for obj_target in o2o[obj][type_target]:
                     h_temporal_relations[(type_source, type_target)].setdefault(
@@ -315,18 +179,6 @@ def totemDiscovery(ocel, tau=0.9):
                         ] += 1
                     if (
                         o_min_times[obj]
-                        <= o_min_times[obj_target]
-                        <= o_max_times[obj_target]
-                        <= o_max_times[obj]
-                    ):
-                        h_temporal_relations[(type_source, type_target)].setdefault(
-                            TR_DEPENDENT_INVERSE, 0
-                        )
-                        h_temporal_relations[(type_source, type_target)][
-                            TR_DEPENDENT_INVERSE
-                        ] += 1
-                    if (
-                        o_min_times[obj]
                         <= o_max_times[obj]
                         <= o_min_times[obj_target]
                         <= o_max_times[obj_target]
@@ -342,27 +194,5 @@ def totemDiscovery(ocel, tau=0.9):
                         h_temporal_relations[(type_source, type_target)][
                             TR_INITIATING
                         ] += 1
-                    if (
-                        o_min_times[obj_target]
-                        <= o_max_times[obj_target]
-                        <= o_min_times[obj]
-                        <= o_max_times[obj]
-                    ) or (
-                        o_min_times[obj_target]
-                        < o_min_times[obj]
-                        <= o_max_times[obj_target]
-                        < o_max_times[obj]
-                    ):
-                        h_temporal_relations[(type_source, type_target)].setdefault(
-                            TR_INITIATING_REVERSE, 0
-                        )
-                        h_temporal_relations[(type_source, type_target)][
-                            TR_INITIATING_REVERSE
-                        ] += 1
-                    # allways parallel
-                    h_temporal_relations[(type_source, type_target)].setdefault(
-                        TR_PARALLEL, 0
-                    )
-                    h_temporal_relations[(type_source, type_target)][TR_PARALLEL] += 1
 
     return h_temporal_relations, h_log_cardinalities

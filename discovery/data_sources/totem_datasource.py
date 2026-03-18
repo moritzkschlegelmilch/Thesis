@@ -12,8 +12,8 @@ class TotemDatasource(DataSource):
         self.event_cardinality_relations = None
 
         super().__init__([
-            TimeRelationScorer(eps_time),
-            CardinalityRelationScorer(0)
+            TimeRelationScorer(0.5),
+            CardinalityRelationScorer(0.5)
         ])
 
     def prepare(self, ocel):
