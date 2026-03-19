@@ -1,7 +1,7 @@
 from discovery.algorithm import ProcessAreaDiscovery
 from totem_lib import import_ocel, totemDiscovery
 
-ocel = import_ocel("example_data/ContainerLogistics.sqlite")
+ocel = import_ocel("example_data/order-management.sqlite")
 
 discovery = ProcessAreaDiscovery(ocel)
 

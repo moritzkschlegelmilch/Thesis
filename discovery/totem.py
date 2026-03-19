@@ -150,10 +150,12 @@ def totemDiscovery(ocel, tau=0.9):
 
                 cardinality = len(o2o[obj][type_target])
                 if cardinality == 1:
-                    h_log_cardinalities[(type_source, type_target)].setdefault(
-                        LC_ONE, 0
-                    )
-                    h_log_cardinalities[(type_source, type_target)][LC_ONE] += 1
+                    target_obj = next(iter(o2o[obj][type_target]))
+                    if len(o2o[target_obj][type_source]) == 1:
+                        h_log_cardinalities[(type_source, type_target)].setdefault(
+                            LC_ONE, 0
+                        )
+                        h_log_cardinalities[(type_source, type_target)][LC_ONE] += 1
                 elif cardinality > 1:
                     h_log_cardinalities[(type_source, type_target)].setdefault(
                         LC_MANY, 0

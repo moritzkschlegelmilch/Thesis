@@ -2,10 +2,15 @@ from repo.discovery.Scorable import Scorable
 
 
 class CardinalityRelationScorer(Scorable):
+
+    def __init__(self, eps):
+        super().__init__(eps)
+
     def assign_score_pull(self, o_1, o_2, data) -> float:
         temp_r = data.cardinality_relations[o_1, o_2]
         temp_r_reverse = data.cardinality_relations[o_2, o_1]
 
+        print(data.cardinality_relations)
         # if they are not related from o_1's perspective, then also not from o_2's perspective
         if "total" not in temp_r or temp_r["total"] == 0:
             return 0

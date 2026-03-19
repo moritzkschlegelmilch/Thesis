@@ -1,8 +1,13 @@
 from pulp import LpProblem, LpVariable, LpMaximize, LpInteger, value, LpMinimize, lpSum, LpStatus, PULP_CBC_CMD
 
+from repo.vorbose import print_tuple_dict_matrices
+
 
 def solve(types, scores_push, scores_pull, K=None,
-                      alpha=1.4, beta=1.0, margin_scale=0.5, verbose=True):
+                      alpha=1.0, beta=1.0, margin_scale=0, verbose=True):
+
+    print_tuple_dict_matrices(scores_push, scores_pull)
+
     if K is None:
         K = len(types)
 

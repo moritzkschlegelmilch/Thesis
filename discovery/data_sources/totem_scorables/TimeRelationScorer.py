@@ -2,6 +2,10 @@ from repo.discovery.Scorable import Scorable
 
 
 class TimeRelationScorer(Scorable):
+
+    def __init__(self, eps):
+        super().__init__(eps)
+
     def assign_score_pull(self, o_1, o_2, data) -> float:
         temp_r = data.temporal_relations[o_1, o_2]
         temp_r_reverse = data.temporal_relations[o_2, o_1]
