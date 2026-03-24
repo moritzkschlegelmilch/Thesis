@@ -1,6 +1,6 @@
 from pulp import LpProblem, LpVariable, LpMaximize, LpInteger, value, LpMinimize, lpSum, LpStatus, PULP_CBC_CMD
 
-from repo.vorbose import print_tuple_dict_matrices
+from repo.vorbose import print_tuple_dict_matrices, visualize_layers_boxed
 
 
 def solve(types, scores_push, scores_pull, K=None,
@@ -52,5 +52,5 @@ def solve(types, scores_push, scores_pull, K=None,
         print("Objective:", value(prob.objective))
         for i in types:
             print(i, solution[i])
-
+        visualize_layers_boxed(solution)
     return solution

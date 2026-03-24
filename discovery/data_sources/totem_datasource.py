@@ -13,8 +13,8 @@ class TotemDatasource(DataSource):
 
         super().__init__(
             scorables=[
-                TimeRelationScorer(0.5),
-                CardinalityRelationScorer(0.5)
+                TimeRelationScorer(1),
+                CardinalityRelationScorer(1)
             ]
         )
 
