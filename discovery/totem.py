@@ -20,30 +20,30 @@ def _build_totem_data(ocel):
     type_to_object: dict[str, set[str]] = {}
 
     # Pass 1: gather event-based object relations and object lifespans
-    for process_execution in ocel.process_executions:
-        for event_id in process_execution:
-            event_timestamp = ocel.get_event_timestamp(event_id)
-            event_objects = get_all_event_objects(ocel, event_id)
+    for event_id in ocel.events["_eventId"]:
 
-            objects_by_type = {
-                obj_type: set(ocel.get_event_objects_by_type(event_id, obj_type))
-                for obj_type in ocel.object_types
-            }
+        event_timestamp = ocel.get_event_timestamp(event_id)
+        event_objects = get_all_event_objects(ocel, event_id)
 
-            for obj_type, objects in objects_by_type.items():
-                if objects:
-                    type_to_object.setdefault(obj_type, set()).update(objects)
+        objects_by_type = {
+            obj_type: set(ocel.get_event_objects_by_type(event_id, obj_type))
+            for obj_type in ocel.object_types
+        }
 
-            for obj in event_objects:
-                o2o.setdefault(obj, {})
-                for obj_type in ocel.object_types:
-                    o2o[obj].setdefault(obj_type, set())
-                    o2o[obj][obj_type].update(objects_by_type[obj_type])
+        for obj_type, objects in objects_by_type.items():
+            if objects:
+                type_to_object.setdefault(obj_type, set()).update(objects)
 
-                if obj not in o_min_times or event_timestamp < o_min_times[obj]:
-                    o_min_times[obj] = event_timestamp
-                if obj not in o_max_times or event_timestamp > o_max_times[obj]:
-                    o_max_times[obj] = event_timestamp
+        for obj in event_objects:
+            o2o.setdefault(obj, {})
+            for obj_type in ocel.object_types:
+                o2o[obj].setdefault(obj_type, set())
+                o2o[obj][obj_type].update(objects_by_type[obj_type])
+
+            if obj not in o_min_times or event_timestamp < o_min_times[obj]:
+                o_min_times[obj] = event_timestamp
+            if obj not in o_max_times or event_timestamp > o_max_times[obj]:
+                o_max_times[obj] = event_timestamp
 
     # Reverse lookup
     object_to_type: dict[str, str] = {}

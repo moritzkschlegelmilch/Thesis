@@ -1,5 +1,6 @@
 import pandas as pd
 
+
 def print_tuple_dict_matrices(push, pull, decimals=4):
     """
     Print two tuple-key dictionaries as matrices in the terminal.
@@ -7,6 +8,7 @@ def print_tuple_dict_matrices(push, pull, decimals=4):
     Each input must look like:
         {('row_name', 'col_name'): value, ...}
     """
+
     def to_matrix(d):
         if not isinstance(d, dict):
             raise TypeError("Each input must be a dictionary.")
@@ -39,6 +41,7 @@ def print_tuple_dict_matrices(push, pull, decimals=4):
 
 
 import matplotlib
+
 matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from collections import defaultdict

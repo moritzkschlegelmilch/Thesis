@@ -1,15 +1,13 @@
-from pulp import LpProblem, LpVariable, LpMaximize, LpInteger, value, LpMinimize, lpSum, LpStatus, PULP_CBC_CMD
+from pulp import LpProblem, LpVariable, LpInteger, value, LpMinimize, lpSum, LpStatus, PULP_CBC_CMD
 
-from repo.vorbose import print_tuple_dict_matrices, visualize_layers_boxed
+from repo.helpers.vorbose import print_tuple_dict_matrices
 
 
-def solve(types, scores_push, scores_pull, K=None,
-                      alpha=1.0, beta=1.0, margin_scale=0, verbose=True):
-
+def solve(types, scores_push, scores_pull,
+          alpha=1.0, beta=1.0, margin_scale=0, verbose=True):
     print_tuple_dict_matrices(scores_push, scores_pull)
 
-    if K is None:
-        K = len(types)
+    K = len(types)
 
     prob = LpProblem("layered_hierarchy_margin", LpMinimize)
     z = LpVariable.dicts("layer", types, lowBound=1, upBound=K, cat=LpInteger)
@@ -37,11 +35,11 @@ def solve(types, scores_push, scores_pull, K=None,
                 prob += hinge[(i, j)] >= m_ij - z[i] + z[j]
 
     prob += (
-        alpha * lpSum(scores_pull[(i, j)] * abs_diff[(i, j)]
-                      for (i, j) in abs_diff)
-        +
-        beta * lpSum(max(0.0, scores_push[(i, j)]) * hinge[(i, j)]
-                     for (i, j) in hinge)
+            alpha * lpSum(scores_pull[(i, j)] * abs_diff[(i, j)]
+                          for (i, j) in abs_diff)
+            +
+            beta * lpSum(max(0.0, scores_push[(i, j)]) * hinge[(i, j)]
+                         for (i, j) in hinge)
     )
 
     status = prob.solve(PULP_CBC_CMD(msg=0))
@@ -52,5 +50,5 @@ def solve(types, scores_push, scores_pull, K=None,
         print("Objective:", value(prob.objective))
         for i in types:
             print(i, solution[i])
-        visualize_layers_boxed(solution)
+
     return solution

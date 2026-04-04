@@ -3,6 +3,8 @@ from math import sqrt
 
 from .Scorable import Scorable
 from .ilp import solve
+from ..helpers import vorbose
+from ..helpers.vorbose import visualize_layers_boxed
 
 
 class ProcessAreaDiscoveryFramework(ABC):
@@ -12,6 +14,7 @@ class ProcessAreaDiscoveryFramework(ABC):
         self.scores_push: dict[tuple[str, str], float] = dict()
         self.scores_pull: dict[tuple[str, str], float] = dict()
         self.ocel = ocel
+        self.solution = None
 
         self.overall_weight: int = 0
         for scorable in self.scorables:
@@ -24,6 +27,11 @@ class ProcessAreaDiscoveryFramework(ABC):
     def assign_scores(self):
         for o_1 in self.ocel.object_types:
             for o_2 in self.ocel.object_types:
+                if o_1 == o_2:
+                    self.scores_pull[o_1, o_2] = 0
+                    self.scores_push[o_1, o_2] = 0
+                    continue
+
                 score_push: float = 0
                 score_pull: float = 0
 
@@ -35,7 +43,10 @@ class ProcessAreaDiscoveryFramework(ABC):
                 self.scores_push[o_1, o_2] = score_push / self.overall_weight
 
     def solve_ilp(self):
-        solve(self.ocel.object_types, self.scores_push, self.scores_pull)
+        self.solution = solve(self.ocel.object_types, self.scores_push, self.scores_pull)
+
+    def visualize(self):
+        visualize_layers_boxed(self.solution)
 
     def run(self):
         self.prepare()
