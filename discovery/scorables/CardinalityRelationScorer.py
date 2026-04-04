@@ -1,9 +1,11 @@
+from collections import defaultdict
+
 from repo.discovery.Scorable import Scorable
 from repo.discovery.totem import _prepare_totem_data
 
 LC_TOTAL = "total"
-LC_ONE = "1"
-LC_MANY = "1..*"
+LC_CONSTANT = "constant"
+LC_MANY = "other"
 
 
 class CardinalityRelationScorer(Scorable):
@@ -20,25 +22,38 @@ class CardinalityRelationScorer(Scorable):
         for source_type in ocel.object_types:
             for target_type in ocel.object_types:
                 pair = (source_type, target_type)
-                h_log_cardinalities.setdefault(pair, {})
-                h_log_cardinalities[pair][LC_TOTAL] = 0
+                bilateral_cardinality_counts = defaultdict(int)
+                total = 0
 
                 for source_obj in type_to_object.get(source_type, set()):
-                    h_log_cardinalities[pair][LC_TOTAL] += 1
-
+                    total += 1
                     target_objects = o2o.get(source_obj, {}).get(target_type, set())
-                    cardinality = len(target_objects)
+                    forward_cardinality = len(target_objects)
+                    if forward_cardinality > 0:
+                        reverse_cardinalities = tuple(sorted(
+                            len(o2o.get(target_obj, {}).get(source_type, set()))
+                            for target_obj in target_objects
+                        ))
+                        bilateral_signature = (forward_cardinality, reverse_cardinalities)
+                        bilateral_cardinality_counts[bilateral_signature] += 1
 
-                    if cardinality == 1:
-                        target_obj = next(iter(target_objects))
-                        reverse_links = o2o.get(target_obj, {}).get(source_type, set())
-                        if len(reverse_links) == 1:
-                            h_log_cardinalities[pair].setdefault(LC_ONE, 0)
-                            h_log_cardinalities[pair][LC_ONE] += 1
+                h_log_cardinalities[pair] = {LC_TOTAL: total}
+                if total == 0 or not bilateral_cardinality_counts:
+                    h_log_cardinalities[pair][LC_CONSTANT] = 0
+                    h_log_cardinalities[pair][LC_MANY] = total
+                    continue
 
-                    elif cardinality > 1:
-                        h_log_cardinalities[pair].setdefault(LC_MANY, 0)
-                        h_log_cardinalities[pair][LC_MANY] += 1
+                dominant_signature = max(
+                    bilateral_cardinality_counts,
+                    key=lambda signature: (
+                        bilateral_cardinality_counts[signature],
+                        -signature[0],
+                        tuple(-value for value in signature[1]),
+                    ),
+                )
+                constant_count = bilateral_cardinality_counts[dominant_signature]
+                h_log_cardinalities[pair][LC_CONSTANT] = constant_count
+                h_log_cardinalities[pair][LC_MANY] = total - constant_count
 
         self.cardinality_relations = h_log_cardinalities
 
@@ -47,23 +62,25 @@ class CardinalityRelationScorer(Scorable):
         temp_r_reverse = self.cardinality_relations[o_2, o_1]
 
         # if they are not related from o_1's perspective, then also not from o_2's perspective
-        if "total" not in temp_r or temp_r["total"] == 0:
+        if LC_TOTAL not in temp_r or temp_r[LC_TOTAL] == 0:
             return 0
 
-        temp_r.setdefault("1", 0)
-        temp_r_reverse.setdefault("1", 0)
+        temp_r.setdefault(LC_CONSTANT, 0)
+        temp_r_reverse.setdefault(LC_CONSTANT, 0)
 
-        return (temp_r["1"] + temp_r_reverse["1"]) / (temp_r["total"] + temp_r_reverse["total"])
+        return (
+            temp_r[LC_CONSTANT] + temp_r_reverse[LC_CONSTANT]
+        ) / (temp_r[LC_TOTAL] + temp_r_reverse[LC_TOTAL])
 
     def assign_score_push(self, o_1, o_2) -> float:
         temp_r = self.cardinality_relations[o_1, o_2]
         temp_r_reverse = self.cardinality_relations[o_2, o_1]
 
         # if they are not related from o_1's perspective, then also not from o_2's perspective
-        if "total" not in temp_r or temp_r["total"] == 0:
+        if LC_TOTAL not in temp_r or temp_r[LC_TOTAL] == 0:
             return 0
 
-        temp_r.setdefault("1..*", 0)
-        temp_r_reverse.setdefault("1..*", 0)
+        temp_r.setdefault(LC_MANY, 0)
+        temp_r_reverse.setdefault(LC_MANY, 0)
 
-        return (temp_r["1..*"] / temp_r["total"]) - (temp_r_reverse["1..*"] / temp_r_reverse["total"])
+        return (temp_r[LC_MANY] / temp_r[LC_TOTAL]) - (temp_r_reverse[LC_MANY] / temp_r_reverse[LC_TOTAL])
