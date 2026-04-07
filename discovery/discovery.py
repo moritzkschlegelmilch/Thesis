@@ -3,8 +3,8 @@ from math import sqrt
 
 from .Scorable import Scorable
 from .ilp import solve
-from ..helpers import vorbose
-from ..helpers.vorbose import visualize_layers_boxed
+from .discovery_preparation import discover_models_for_hierarchy
+from ..helpers.vorbose import visualize_hierarchy_with_models, visualize_layers_boxed
 
 
 class ProcessAreaDiscoveryFramework(ABC):
@@ -15,6 +15,8 @@ class ProcessAreaDiscoveryFramework(ABC):
         self.scores_pull: dict[tuple[str, str], float] = dict()
         self.ocel = ocel
         self.solution = None
+        self.activity_to_layer = None
+        self.discovered_models = None
 
         self.overall_weight: int = 0
         for scorable in self.scorables:
@@ -36,8 +38,8 @@ class ProcessAreaDiscoveryFramework(ABC):
                 score_pull: float = 0
 
                 for scorable in self.scorables:
-                    score_push += scorable.assign_score_push(o_1, o_2)*scorable.eps
-                    score_pull += scorable.assign_score_pull(o_1, o_2)*scorable.eps
+                    score_push += scorable.assign_score_push(o_1, o_2) * scorable.eps
+                    score_pull += scorable.assign_score_pull(o_1, o_2) * scorable.eps
 
                 self.scores_pull[o_1, o_2] = score_pull / self.overall_weight
                 self.scores_push[o_1, o_2] = score_push / self.overall_weight
@@ -45,10 +47,25 @@ class ProcessAreaDiscoveryFramework(ABC):
     def solve_ilp(self):
         self.solution = solve(self.ocel.object_types, self.scores_push, self.scores_pull)
 
-    def visualize(self):
-        visualize_layers_boxed(self.solution)
+    def visualize_layers(self, title="Hierarchy Layers", output_path=None):
+        return visualize_layers_boxed(self.solution, title=title, output_path=output_path)
+
+    def visualize(self, title="Hierarchy with Process Models", output_path=None):
+        return visualize_hierarchy_with_models(
+            self.solution,
+            self.discovered_models,
+            title=title,
+            output_path=output_path,
+        )
+
+    def discover_models(self):
+        self.activity_to_layer, self.discovered_models = discover_models_for_hierarchy(
+            self.ocel,
+            self.solution,
+        )
 
     def run(self):
         self.prepare()
         self.assign_scores()
         self.solve_ilp()
+        self.discover_models()

@@ -40,10 +40,11 @@ def _build_totem_data(ocel):
                 o2o[obj].setdefault(obj_type, set())
                 o2o[obj][obj_type].update(objects_by_type[obj_type])
 
-            if obj not in o_min_times or event_timestamp < o_min_times[obj]:
-                o_min_times[obj] = event_timestamp
-            if obj not in o_max_times or event_timestamp > o_max_times[obj]:
-                o_max_times[obj] = event_timestamp
+            if event_timestamp is not None:
+                if obj not in o_min_times or o_min_times[obj] is None or event_timestamp < o_min_times[obj]:
+                    o_min_times[obj] = event_timestamp
+                if obj not in o_max_times or o_max_times[obj] is None or event_timestamp > o_max_times[obj]:
+                    o_max_times[obj] = event_timestamp
 
     # Reverse lookup
     object_to_type: dict[str, str] = {}

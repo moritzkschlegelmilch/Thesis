@@ -26,6 +26,14 @@ class TimeRelationScorer(Scorable):
                     target_objects = o2o.get(source_obj, {}).get(target_type, set())
 
                     for target_obj in target_objects:
+                        if (
+                                source_obj not in o_min_times
+                                or source_obj not in o_max_times
+                                or target_obj not in o_min_times
+                                or target_obj not in o_max_times
+                        ):
+                            continue
+
                         h_temporal_relations[pair].setdefault(TR_TOTAL, 0)
                         h_temporal_relations[pair][TR_TOTAL] += 1
 

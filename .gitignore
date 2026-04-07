@@ -1,3 +1,4 @@
 __pycache__/
 *.pyc
 example_data/
+example_simulation_data/

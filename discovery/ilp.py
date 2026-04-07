@@ -4,8 +4,7 @@ from repo.helpers.vorbose import print_tuple_dict_matrices
 
 
 def solve(types, scores_push, scores_pull,
-          alpha=1.0, beta=1.0, margin_scale=0, verbose=True):
-    print_tuple_dict_matrices(scores_push, scores_pull)
+          alpha=1.0, beta=1.0, margin_scale=0, verbose=False):
 
     K = len(types)
 
