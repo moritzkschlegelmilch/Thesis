@@ -1,6 +1,7 @@
 from collections import defaultdict
 from io import BytesIO
 from pathlib import Path
+import textwrap
 
 import matplotlib
 import pandas as pd
@@ -98,10 +99,21 @@ def visualize_layers_boxed(solution, title="Hierarchy Layers", output_path=None)
 
 
 def _load_font(size):
-    try:
-        return ImageFont.truetype("DejaVuSans.ttf", size)
-    except OSError:
-        return ImageFont.load_default()
+    font_candidates = [
+        "DejaVuSans.ttf",
+        "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        "/System/Library/Fonts/Supplemental/Arial.ttf",
+        "/System/Library/Fonts/Supplemental/Helvetica.ttc",
+        "/System/Library/Fonts/Supplemental/Tahoma.ttf",
+    ]
+
+    for font_path in font_candidates:
+        try:
+            return ImageFont.truetype(font_path, size)
+        except OSError:
+            continue
+
+    return ImageFont.load_default()
 
 
 def _render_ocpn_image(ocpn, max_size=(1400, 700)):
@@ -149,6 +161,32 @@ def _placeholder_model_image(text, size=(900, 220)):
     return image
 
 
+def _wrap_object_types_text(text, width=18):
+    parts = [part.strip() for part in text.split(",") if part.strip()]
+    if not parts:
+        return "None"
+
+    wrapped_lines = []
+    current_line = ""
+    for part in parts:
+        candidate = part if not current_line else f"{current_line}, {part}"
+        if len(candidate) <= width:
+            current_line = candidate
+        else:
+            if current_line:
+                wrapped_lines.append(current_line)
+            if len(part) <= width:
+                current_line = part
+            else:
+                wrapped_lines.extend(textwrap.wrap(part, width=width))
+                current_line = ""
+
+    if current_line:
+        wrapped_lines.append(current_line)
+
+    return "\n".join(wrapped_lines)
+
+
 def visualize_hierarchy_with_models(
         solution,
         discovered_models,
@@ -159,13 +197,14 @@ def visualize_hierarchy_with_models(
         return None
 
     title_font = _load_font(34)
-    heading_font = _load_font(24)
-    body_font = _load_font(20)
+    heading_font = _load_font(34)
+    label_font = _load_font(28)
+    object_font = _load_font(52)
 
     layers = sorted(solution.values(), reverse=True)
     layers = list(dict.fromkeys(layers))
 
-    text_panel_width = 420
+    text_panel_width = 900
     outer_padding = 30
     row_padding = 24
     panel_gap = 28
@@ -180,15 +219,17 @@ def visualize_hierarchy_with_models(
     for layer in layers:
         model_data = discovered_models.get(layer, {})
         object_types = model_data.get("object_types", [])
-        object_types_text = ", ".join(object_types) if object_types else "None"
-        text = f"Layer {layer}\nObject types:\n{object_types_text}"
-        text_bbox = dummy_draw.multiline_textbbox(
+        object_types_text = _wrap_object_types_text(", ".join(object_types) if object_types else "None")
+        label_bbox = dummy_draw.textbbox((0, 0), "Object types:", font=label_font)
+        objects_bbox = dummy_draw.multiline_textbbox(
             (0, 0),
-            text,
-            font=body_font,
-            spacing=8,
+            object_types_text,
+            font=object_font,
+            spacing=14,
         )
-        text_height = (text_bbox[3] - text_bbox[1]) + 60
+        label_height = label_bbox[3] - label_bbox[1]
+        objects_height = objects_bbox[3] - objects_bbox[1]
+        text_height = 40 + label_height + 22 + objects_height + 50
 
         try:
             model_image = _render_ocpn_image(model_data.get("ocpn"))
@@ -202,7 +243,7 @@ def visualize_hierarchy_with_models(
         row_height = max(text_height, model_image.height)
         row_data.append({
             "layer": layer,
-            "text": text,
+            "object_types_text": object_types_text,
             "model_image": model_image,
             "row_height": row_height,
         })
@@ -240,11 +281,18 @@ def visualize_hierarchy_with_models(
             font=heading_font,
         )
         draw.multiline_text(
-            (outer_padding + 18, heading_y + 42),
-            row["text"].split("\n", 1)[1],
+            (outer_padding + 18, heading_y + 52),
+            "Object types:",
             fill="black",
-            font=body_font,
-            spacing=8,
+            font=label_font,
+            spacing=12,
+        )
+        draw.multiline_text(
+            (outer_padding + 18, heading_y + 92),
+            row["object_types_text"],
+            fill="black",
+            font=object_font,
+            spacing=14,
         )
 
         model_x = outer_padding + text_panel_width + panel_gap
