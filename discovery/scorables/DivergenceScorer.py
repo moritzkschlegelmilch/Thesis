@@ -14,6 +14,8 @@ class DivergenceScorer(Scorable):
         self.object_types = list()
 
     def prepare(self, ocel):
+        event_ids = list(ocel.events["_eventId"])
+
         _, _, o2o, self.type_to_object = _prepare_totem_data(ocel)
         self.object_types = list(ocel.object_types)
         self.type_to_type = {
@@ -34,7 +36,7 @@ class DivergenceScorer(Scorable):
                 object_to_type[obj] = obj_type
 
         targets_by_pair_activity_source = defaultdict(set)
-        for event_id in ocel.events["_eventId"]:
+        for event_id in event_ids:
             activity = ocel.get_event_activity(event_id)
             objects_by_type = defaultdict(set)
             for obj in get_all_event_objects(ocel, event_id):
@@ -55,16 +57,23 @@ class DivergenceScorer(Scorable):
                         targets_by_pair_activity_source[key_prefix + (source_obj,)].add(target_objects)
 
         divergences = defaultdict(set)
+        counter = 0
+        total_buckets = len(targets_by_pair_activity_source)
         for (pair, _, _), target_sets in targets_by_pair_activity_source.items():
-            target_sets = list(target_sets)
+            counter += 1
             if len(target_sets) < 2:
                 continue
 
-            for index, target_objects in enumerate(target_sets):
-                for other_target_objects in target_sets[index + 1:]:
-                    diff = target_objects ^ other_target_objects
-                    if diff:
-                        divergences[pair].update(diff)
+            target_sets_iter = iter(target_sets)
+            first_target_set = next(target_sets_iter)
+            union_targets = set(first_target_set)
+            intersection_targets = set(first_target_set)
+
+            for target_objects in target_sets_iter:
+                union_targets.update(target_objects)
+                intersection_targets.intersection_update(target_objects)
+
+            divergences[pair].update(union_targets - intersection_targets)
 
         self.divergence_relations = dict(divergences)
 

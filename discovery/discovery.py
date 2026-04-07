@@ -24,6 +24,7 @@ class ProcessAreaDiscoveryFramework(ABC):
 
     def prepare(self):
         for scorable in self.scorables:
+            print("preparing number", scorable.__class__.__name__)
             scorable.prepare(self.ocel)
 
     def assign_scores(self):
