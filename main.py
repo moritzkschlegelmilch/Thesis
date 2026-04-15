@@ -11,4 +11,4 @@ discovery = ProcessAreaDiscovery(ocel)
 discovery.run()
 discovery.visualize()
 
-#print(test_log_folder("./example_simulation_data", "./testing_output", recursive=True))
+#test_log_folder("./example_simulation_data", "./testing_output", recursive=True)
