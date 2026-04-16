@@ -1,4 +1,5 @@
 from collections import defaultdict
+from numbers import Integral
 
 import pandas as pd
 import pm4py
@@ -7,20 +8,38 @@ from pm4py.objects.ocel.obj import OCEL
 from .totem import _prepare_totem_data, get_all_event_objects
 
 
-def _discover_activity_resources(event_records, activity_to_layer, object_to_type, solution):
+def _normalize_layer_context(discovered_layers, layer_context):
+    if layer_context is None:
+        return {layer: 1 for layer in discovered_layers}
+
+    if len(layer_context) != len(discovered_layers):
+        raise ValueError(
+            "layer_context must have one entry per discovered layer "
+            "(ordered from the lowest to the highest layer)."
+        )
+
+    normalized_layer_context = {}
+    for index, (layer, context_value) in enumerate(zip(discovered_layers, layer_context)):
+        if isinstance(context_value, bool) or not isinstance(context_value, Integral) or context_value < 0:
+            raise ValueError(
+                "Each layer_context entry must be a non-negative integer. "
+                f"Invalid value at index {index}: {context_value!r}"
+            )
+        normalized_layer_context[layer] = int(context_value)
+
+    return normalized_layer_context
+
+
+def _discover_activity_resources(event_records, object_to_type, solution, reference_layer):
     activity_event_counts = defaultdict(int)
     activity_resource_counts = defaultdict(lambda: defaultdict(int))
 
     for _, activity, _, event_objects in event_records:
-        activity_layer = activity_to_layer.get(activity)
-        if activity_layer is None:
-            continue
-
         activity_event_counts[activity] += 1
         higher_layer_types = {
             object_to_type[obj]
             for obj in event_objects
-            if solution[object_to_type[obj]] > activity_layer
+            if solution[object_to_type[obj]] > reference_layer
         }
 
         for object_type in higher_layer_types:
@@ -39,7 +58,7 @@ def _discover_activity_resources(event_records, activity_to_layer, object_to_typ
     return activity_resources
 
 
-def discover_models_for_hierarchy(ocel, solution):
+def discover_models_for_hierarchy(ocel, solution, layer_context=None):
     _, _, _, type_to_object = _prepare_totem_data(ocel)
 
     object_to_type = {}
@@ -71,25 +90,23 @@ def discover_models_for_hierarchy(ocel, solution):
 
         event_records.append((event_id, activity, timestamp, event_objects))
 
-    layer_to_activities = defaultdict(set)
-    for activity, layer in activity_to_layer.items():
-        layer_to_activities[layer].add(activity)
-
-    activity_resources = _discover_activity_resources(
-        event_records,
-        activity_to_layer,
-        object_to_type,
-        solution,
-    )
+    discovered_layers = sorted(layer_to_object_types)
+    layer_context_by_layer = _normalize_layer_context(discovered_layers, layer_context)
 
     discovered_models = {}
-    for layer in sorted(layer_to_object_types):
+    for layer in discovered_layers:
         selected_object_types = layer_to_object_types[layer]
-        selected_activities = layer_to_activities.get(layer, set())
+        selected_activities = {
+            activity
+            for activity, activity_layer in activity_to_layer.items()
+            if activity_layer <= layer and layer - activity_layer <= layer_context_by_layer[layer]
+        }
 
         event_rows = []
         relation_rows = []
         used_objects = set()
+        included_event_records = []
+        included_activities = set()
 
         for event_id, activity, timestamp, event_objects in event_records:
             if activity not in selected_activities:
@@ -102,6 +119,8 @@ def discover_models_for_hierarchy(ocel, solution):
             if not selected_event_objects:
                 continue
 
+            included_event_records.append((event_id, activity, timestamp, event_objects))
+            included_activities.add(activity)
             event_rows.append({
                 "ocel:eid": event_id,
                 "ocel:activity": activity,
@@ -137,6 +156,19 @@ def discover_models_for_hierarchy(ocel, solution):
             if source_obj in used_objects and target_obj in used_objects
         ]
 
+        activity_resources = _discover_activity_resources(
+            included_event_records,
+            object_to_type,
+            solution,
+            layer,
+        )
+        included_activities = sorted(included_activities)
+        highlighted_activities = sorted(
+            activity
+            for activity in included_activities
+            if activity_to_layer[activity] == layer - 1
+        )
+
         layer_ocel = OCEL(
             events=pd.DataFrame(
                 event_rows,
@@ -169,11 +201,12 @@ def discover_models_for_hierarchy(ocel, solution):
 
         discovered_models[layer] = {
             "object_types": sorted(selected_object_types),
-            "activities": sorted(selected_activities),
+            "activities": included_activities,
             "activity_resources": {
                 activity: activity_resources.get(activity, [])
-                for activity in sorted(selected_activities)
+                for activity in included_activities
             },
+            "highlighted_activities": highlighted_activities,
             "ocel": layer_ocel,
             "ocpn": ocpn,
         }

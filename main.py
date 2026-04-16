@@ -8,7 +8,8 @@ from totem_lib import import_ocel
 ocel = import_ocel("example_data/ContainerLogistics.sqlite")
 
 discovery = ProcessAreaDiscovery(ocel)
-discovery.run()
+discovery.get_layers()
+discovery.discover_models()
 discovery.visualize()
 
 #print(test_log_folder("./example_simulation_data", "./testing_output", recursive=True))

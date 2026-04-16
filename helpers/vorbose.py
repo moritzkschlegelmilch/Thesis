@@ -186,12 +186,19 @@ def _build_activity_label(activity, resource_types, object_type_colors):
     )
 
 
-def _build_ocpn_graphviz(ocpn, object_type_colors=None, activity_resource_types=None, parameters=None):
+def _build_ocpn_graphviz(
+        ocpn,
+        object_type_colors=None,
+        activity_resource_types=None,
+        highlighted_activities=None,
+        parameters=None,
+):
     if parameters is None:
         parameters = {}
 
     object_type_colors = object_type_colors or {}
     activity_resource_types = activity_resource_types or {}
+    highlighted_activities = set(highlighted_activities or [])
     parameters_enum = wo_decoration.Parameters
     image_format = wo_decoration.exec_utils.get_param_value(parameters_enum.FORMAT, parameters, "png")
     bgcolor = wo_decoration.exec_utils.get_param_value(
@@ -243,7 +250,14 @@ def _build_ocpn_graphviz(ocpn, object_type_colors=None, activity_resource_types=
             activity_resource_types.get(activity, []),
             object_type_colors,
         )
-        viz.node(activities_map[activity], label=label, shape="box")
+        node_kwargs = {
+            "label": label,
+            "shape": "box",
+        }
+        if activity in highlighted_activities:
+            node_kwargs["style"] = "filled"
+            node_kwargs["fillcolor"] = "#f7d7a6"
+        viz.node(activities_map[activity], **node_kwargs)
 
     for object_type in ocpn["petri_nets"]:
         object_type_color = object_type_colors.get(object_type, wo_decoration.ot_to_color(object_type))
@@ -347,6 +361,7 @@ def _render_ocpn_image(
         max_size=(1400, 700),
         object_type_colors=None,
         activity_resource_types=None,
+        highlighted_activities=None,
 ):
     if ocpn is None:
         return None
@@ -355,6 +370,7 @@ def _render_ocpn_image(
         ocpn,
         object_type_colors=object_type_colors,
         activity_resource_types=activity_resource_types,
+        highlighted_activities=highlighted_activities,
     )
     image = Image.open(BytesIO(gviz.pipe(format="png"))).convert("RGBA")
     image = ImageOps.contain(image, max_size)
@@ -552,6 +568,7 @@ def visualize_hierarchy_with_models(
                 model_data.get("ocpn"),
                 object_type_colors=object_type_colors,
                 activity_resource_types=model_data.get("activity_resources"),
+                highlighted_activities=model_data.get("highlighted_activities"),
             )
         except Exception:
             model_image = None

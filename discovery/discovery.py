@@ -46,6 +46,7 @@ class ProcessAreaDiscoveryFramework(ABC):
 
     def solve_ilp(self):
         self.solution = solve(self.ocel.object_types, self.scores_push, self.scores_pull)
+        return self.solution
 
     def visualize_layers(self, title="Hierarchy Layers", output_path=None):
         return visualize_layers_boxed(self.solution, title=title, output_path=output_path)
@@ -58,14 +59,14 @@ class ProcessAreaDiscoveryFramework(ABC):
             output_path=output_path,
         )
 
-    def discover_models(self):
+    def discover_models(self, layer_context=None):
         self.activity_to_layer, self.discovered_models = discover_models_for_hierarchy(
             self.ocel,
             self.solution,
+            layer_context=layer_context,
         )
 
-    def run(self):
+    def get_layers(self):
         self.prepare()
         self.assign_scores()
-        self.solve_ilp()
-        self.discover_models()
+        return self.solve_ilp()
