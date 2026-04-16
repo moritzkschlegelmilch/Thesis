@@ -6,6 +6,7 @@ import pm4py
 from pm4py.objects.ocel.obj import OCEL
 
 from .totem import _prepare_totem_data, get_all_event_objects
+from .subprocess_detection import detect_subprocess_components
 
 
 def _normalize_layer_context(discovered_layers, layer_context):
@@ -196,8 +197,14 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
         )
 
         ocpn = None
+        subprocess_components = []
         if not layer_ocel.events.empty and not layer_ocel.relations.empty:
             ocpn = pm4py.discover_oc_petri_net(layer_ocel)
+            subprocess_components = detect_subprocess_components(
+                ocpn,
+                activity_to_layer,
+                layer,
+            )
 
         discovered_models[layer] = {
             "object_types": sorted(selected_object_types),
@@ -209,6 +216,7 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
             "highlighted_activities": highlighted_activities,
             "ocel": layer_ocel,
             "ocpn": ocpn,
+            "subprocess_components": subprocess_components,
         }
 
     return dict(activity_to_layer), discovered_models

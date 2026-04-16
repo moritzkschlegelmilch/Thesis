@@ -4,3 +4,6 @@ example_data/
 example_simulation_data/
 testing_output/
 tests/
+!tests/
+tests/*
+!tests/test_subprocess_detection.py

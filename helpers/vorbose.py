@@ -10,6 +10,8 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from pm4py.visualization.ocel.ocpn.variants import wo_decoration
 
+from ..discovery.subprocess_detection import _arc_key, _place_key, _transition_key
+
 
 def print_tuple_dict_matrices(push, pull, decimals=4):
     """
@@ -186,11 +188,72 @@ def _build_activity_label(activity, resource_types, object_type_colors):
     )
 
 
+def _unique_colors(colors):
+    return tuple(dict.fromkeys(colors))
+
+
+def _build_subprocess_style_index(subprocess_components):
+    transition_colors = defaultdict(list)
+    place_colors = defaultdict(list)
+    arc_colors = defaultdict(list)
+
+    for component in subprocess_components or []:
+        color = component.get("color")
+        if not color:
+            continue
+
+        for transition_key in component.get("transition_keys", ()):
+            transition_colors[transition_key].append(color)
+        for place_key in component.get("place_keys", ()):
+            place_colors[place_key].append(color)
+        for arc_key in component.get("arc_keys", ()):
+            arc_colors[arc_key].append(color)
+
+    return {
+        "transitions": {
+            key: _unique_colors(colors)
+            for key, colors in transition_colors.items()
+        },
+        "places": {
+            key: _unique_colors(colors)
+            for key, colors in place_colors.items()
+        },
+        "arcs": {
+            key: _unique_colors(colors)
+            for key, colors in arc_colors.items()
+        },
+    }
+
+
+def _node_border_attributes(colors):
+    unique_colors = _unique_colors(colors)
+    if not unique_colors:
+        return {}
+
+    border_attributes = {
+        "color": unique_colors[0],
+        "penwidth": "2.5",
+    }
+    if len(unique_colors) > 1:
+        border_attributes["peripheries"] = str(len(unique_colors))
+    return border_attributes
+
+
+def _apply_node_border(node_kwargs, border_attributes):
+    if not border_attributes:
+        return
+
+    node_kwargs.update(border_attributes)
+    if node_kwargs.get("style") is None:
+        node_kwargs["style"] = "solid"
+
+
 def _build_ocpn_graphviz(
         ocpn,
         object_type_colors=None,
         activity_resource_types=None,
         highlighted_activities=None,
+        subprocess_components=None,
         parameters=None,
 ):
     if parameters is None:
@@ -199,6 +262,7 @@ def _build_ocpn_graphviz(
     object_type_colors = object_type_colors or {}
     activity_resource_types = activity_resource_types or {}
     highlighted_activities = set(highlighted_activities or [])
+    subprocess_styles = _build_subprocess_style_index(subprocess_components)
     parameters_enum = wo_decoration.Parameters
     image_format = wo_decoration.exec_utils.get_param_value(parameters_enum.FORMAT, parameters, "png")
     bgcolor = wo_decoration.exec_utils.get_param_value(
@@ -250,6 +314,7 @@ def _build_ocpn_graphviz(
             activity_resource_types.get(activity, []),
             object_type_colors,
         )
+        activity_colors = subprocess_styles["transitions"].get(("activity", activity), ())
         node_kwargs = {
             "label": label,
             "shape": "box",
@@ -257,6 +322,7 @@ def _build_ocpn_graphviz(
         if activity in highlighted_activities:
             node_kwargs["style"] = "filled"
             node_kwargs["fillcolor"] = "#f7d7a6"
+        _apply_node_border(node_kwargs, _node_border_attributes(activity_colors))
         viz.node(activities_map[activity], **node_kwargs)
 
     for object_type in ocpn["petri_nets"]:
@@ -275,6 +341,8 @@ def _build_ocpn_graphviz(
             place_shape = "circle"
             place_fontcolor = None
             place_fillcolor = object_type_color
+            place_key = _place_key(object_type, place)
+            place_colors = subprocess_styles["places"].get(place_key, ())
 
             if place in initial_marking:
                 place_label = object_type
@@ -295,43 +363,57 @@ def _build_ocpn_graphviz(
                     diagnostics["r"],
                 )
 
-            viz.node(
-                place_id,
-                label=place_label,
-                shape=place_shape,
-                style="filled" if place_fillcolor is not None else None,
-                fillcolor=place_fillcolor,
-                fontcolor=place_fontcolor,
-            )
+            border_attributes = _node_border_attributes(place_colors)
+
+            node_kwargs = {
+                "label": place_label,
+                "shape": place_shape,
+                "style": "filled" if place_fillcolor is not None else None,
+                "fillcolor": place_fillcolor,
+                "fontcolor": place_fontcolor,
+            }
+            _apply_node_border(node_kwargs, border_attributes)
+            viz.node(place_id, **node_kwargs)
 
         for transition in net.transitions:
             if transition.label is not None:
                 transition_map[transition] = activities_map[transition.label]
             else:
+                transition_key = _transition_key(object_type, transition)
+                transition_colors = subprocess_styles["transitions"].get(transition_key, ())
                 transition_map[transition] = str(wo_decoration.uuid.uuid4())
+                node_kwargs = {
+                    "label": " ",
+                    "shape": "box",
+                    "style": "filled",
+                    "fillcolor": object_type_color,
+                }
+                _apply_node_border(node_kwargs, _node_border_attributes(transition_colors))
                 viz.node(
                     transition_map[transition],
-                    label=" ",
-                    shape="box",
-                    style="filled",
-                    fillcolor=object_type_color,
+                    **node_kwargs,
                 )
 
         for arc in net.arcs:
             arc_label = " "
+            arc_key = _arc_key(object_type, arc)
+            arc_colors = subprocess_styles["arcs"].get(arc_key, ())
+            arc_color = ":".join(arc_colors) if arc_colors else object_type_color
             if isinstance(arc.source, wo_decoration.PetriNet.Place):
                 is_double = (
                     arc.target.label in ocpn["double_arcs_on_activity"][object_type]
                     and ocpn["double_arcs_on_activity"][object_type][arc.target.label]
                 )
-                penwidth = "4.0" if is_double else "1.0"
+                penwidth = 4.0 if is_double else 1.0
+                if arc_colors:
+                    penwidth = max(penwidth, 3.0)
                 if arc.target in transition_diagnostics:
                     arc_label = str(transition_diagnostics[arc.target])
                 viz.edge(
                     places[arc.source],
                     transition_map[arc.target],
-                    color=object_type_color,
-                    penwidth=penwidth,
+                    color=arc_color,
+                    penwidth=str(penwidth),
                     label=arc_label,
                 )
             elif isinstance(arc.source, wo_decoration.PetriNet.Transition):
@@ -339,14 +421,16 @@ def _build_ocpn_graphviz(
                     arc.source.label in ocpn["double_arcs_on_activity"][object_type]
                     and ocpn["double_arcs_on_activity"][object_type][arc.source.label]
                 )
-                penwidth = "4.0" if is_double else "1.0"
+                penwidth = 4.0 if is_double else 1.0
+                if arc_colors:
+                    penwidth = max(penwidth, 3.0)
                 if arc.source in transition_diagnostics:
                     arc_label = str(transition_diagnostics[arc.source])
                 viz.edge(
                     transition_map[arc.source],
                     places[arc.target],
-                    color=object_type_color,
-                    penwidth=penwidth,
+                    color=arc_color,
+                    penwidth=str(penwidth),
                     label=arc_label,
                 )
 
@@ -362,6 +446,7 @@ def _render_ocpn_image(
         object_type_colors=None,
         activity_resource_types=None,
         highlighted_activities=None,
+        subprocess_components=None,
 ):
     if ocpn is None:
         return None
@@ -371,6 +456,7 @@ def _render_ocpn_image(
         object_type_colors=object_type_colors,
         activity_resource_types=activity_resource_types,
         highlighted_activities=highlighted_activities,
+        subprocess_components=subprocess_components,
     )
     image = Image.open(BytesIO(gviz.pipe(format="png"))).convert("RGBA")
     image = ImageOps.contain(image, max_size)
@@ -569,6 +655,7 @@ def visualize_hierarchy_with_models(
                 object_type_colors=object_type_colors,
                 activity_resource_types=model_data.get("activity_resources"),
                 highlighted_activities=model_data.get("highlighted_activities"),
+                subprocess_components=model_data.get("subprocess_components"),
             )
         except Exception:
             model_image = None
