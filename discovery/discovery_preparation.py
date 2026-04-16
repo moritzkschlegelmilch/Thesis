@@ -7,6 +7,38 @@ from pm4py.objects.ocel.obj import OCEL
 from .totem import _prepare_totem_data, get_all_event_objects
 
 
+def _discover_activity_resources(event_records, activity_to_layer, object_to_type, solution):
+    activity_event_counts = defaultdict(int)
+    activity_resource_counts = defaultdict(lambda: defaultdict(int))
+
+    for _, activity, _, event_objects in event_records:
+        activity_layer = activity_to_layer.get(activity)
+        if activity_layer is None:
+            continue
+
+        activity_event_counts[activity] += 1
+        higher_layer_types = {
+            object_to_type[obj]
+            for obj in event_objects
+            if solution[object_to_type[obj]] > activity_layer
+        }
+
+        for object_type in higher_layer_types:
+            activity_resource_counts[activity][object_type] += 1
+
+    activity_resources = {}
+    for activity, total_count in activity_event_counts.items():
+        qualifying_object_types = [
+            object_type
+            for object_type, occurrence_count in activity_resource_counts[activity].items()
+            if occurrence_count / total_count >= 0.5
+        ]
+        qualifying_object_types.sort(key=lambda object_type: (-solution[object_type], object_type))
+        activity_resources[activity] = qualifying_object_types
+
+    return activity_resources
+
+
 def discover_models_for_hierarchy(ocel, solution):
     _, _, _, type_to_object = _prepare_totem_data(ocel)
 
@@ -42,6 +74,13 @@ def discover_models_for_hierarchy(ocel, solution):
     layer_to_activities = defaultdict(set)
     for activity, layer in activity_to_layer.items():
         layer_to_activities[layer].add(activity)
+
+    activity_resources = _discover_activity_resources(
+        event_records,
+        activity_to_layer,
+        object_to_type,
+        solution,
+    )
 
     discovered_models = {}
     for layer in sorted(layer_to_object_types):
@@ -131,6 +170,10 @@ def discover_models_for_hierarchy(ocel, solution):
         discovered_models[layer] = {
             "object_types": sorted(selected_object_types),
             "activities": sorted(selected_activities),
+            "activity_resources": {
+                activity: activity_resources.get(activity, [])
+                for activity in sorted(selected_activities)
+            },
             "ocel": layer_ocel,
             "ocpn": ocpn,
         }

@@ -1,12 +1,14 @@
 from collections import defaultdict
 from io import BytesIO
 from pathlib import Path
+import colorsys
+import html
 import textwrap
 
 import matplotlib
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-from pm4py.visualization.ocel.ocpn import visualizer as ocpn_visualizer
+from pm4py.visualization.ocel.ocpn.variants import wo_decoration
 
 
 def print_tuple_dict_matrices(push, pull, decimals=4):
@@ -116,11 +118,244 @@ def _load_font(size):
     return ImageFont.load_default()
 
 
-def _render_ocpn_image(ocpn, max_size=(1400, 700)):
+def _rgb_to_hex(rgb):
+    return "#" + "".join(f"{round(channel * 255):02x}" for channel in rgb)
+
+
+def _fallback_unique_color(index, used_colors):
+    color_value = (index * 0x9E3779B1 + 0x12345) & 0xFFFFFF
+
+    while True:
+        color = f"#{color_value:06x}"
+        if color not in used_colors:
+            return color
+        color_value = (color_value + 1) & 0xFFFFFF
+
+
+def _build_object_type_colors(object_types):
+    unique_object_types = sorted(set(object_types))
+    if not unique_object_types:
+        return {}
+
+    used_colors = set()
+    object_type_colors = {}
+    golden_ratio = 0.618033988749895
+
+    for index, object_type in enumerate(unique_object_types):
+        color = None
+
+        # Use a golden-ratio hue sequence so neighboring assignments stay well
+        # separated, then vary saturation/lightness if rounding to RGB would
+        # otherwise reuse a color.
+        for variant in range(12):
+            hue = (index * golden_ratio + variant * (1 / 36)) % 1.0
+            saturation = 0.55 + 0.1 * (variant % 3)
+            lightness = 0.45 + 0.08 * ((variant // 3) % 3)
+            candidate = _rgb_to_hex(colorsys.hls_to_rgb(hue, lightness, saturation))
+            if candidate not in used_colors:
+                color = candidate
+                break
+
+        if color is None:
+            color = _fallback_unique_color(index, used_colors)
+
+        used_colors.add(color)
+        object_type_colors[object_type] = color
+
+    return object_type_colors
+
+
+def _build_activity_label(activity, resource_types, object_type_colors):
+    resource_types = resource_types or []
+    if not resource_types:
+        return activity
+
+    dots = "&#8201;".join(
+        (
+            f'<FONT COLOR="{object_type_colors.get(object_type, "#000000")}" '
+            'POINT-SIZE="16">&#9679;</FONT>'
+        )
+        for object_type in resource_types
+    )
+    escaped_activity = html.escape(activity)
+    return (
+        '<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="0">'
+        f'<TR><TD ALIGN="RIGHT">{dots}</TD></TR>'
+        f'<TR><TD ALIGN="CENTER">{escaped_activity}</TD></TR>'
+        '</TABLE>>'
+    )
+
+
+def _build_ocpn_graphviz(ocpn, object_type_colors=None, activity_resource_types=None, parameters=None):
+    if parameters is None:
+        parameters = {}
+
+    object_type_colors = object_type_colors or {}
+    activity_resource_types = activity_resource_types or {}
+    parameters_enum = wo_decoration.Parameters
+    image_format = wo_decoration.exec_utils.get_param_value(parameters_enum.FORMAT, parameters, "png")
+    bgcolor = wo_decoration.exec_utils.get_param_value(
+        parameters_enum.BGCOLOR,
+        parameters,
+        wo_decoration.constants.DEFAULT_BGCOLOR,
+    )
+    rankdir = wo_decoration.exec_utils.get_param_value(
+        parameters_enum.RANKDIR,
+        parameters,
+        wo_decoration.constants.DEFAULT_RANKDIR_GVIZ,
+    )
+    enable_graph_title = wo_decoration.exec_utils.get_param_value(
+        parameters_enum.ENABLE_GRAPH_TITLE,
+        parameters,
+        wo_decoration.constants.DEFAULT_ENABLE_GRAPH_TITLES,
+    )
+    graph_title = wo_decoration.exec_utils.get_param_value(
+        parameters_enum.GRAPH_TITLE,
+        parameters,
+        "Object-Centric Petri net",
+    )
+
+    filename = wo_decoration.tempfile.NamedTemporaryFile(suffix=".gv")
+    filename.close()
+
+    viz = wo_decoration.Digraph(
+        "ocpn",
+        filename=filename.name,
+        engine="dot",
+        graph_attr={"bgcolor": bgcolor},
+    )
+    viz.attr("node", shape="ellipse", fixedsize="false")
+
+    if enable_graph_title:
+        viz.attr(
+            label='<<FONT POINT-SIZE="20">' + graph_title + "</FONT>>",
+            labelloc="top",
+        )
+
+    activities_map = {}
+    transition_map = {}
+    places = {}
+
+    for activity in ocpn["activities"]:
+        activities_map[activity] = str(wo_decoration.uuid.uuid4())
+        label = _build_activity_label(
+            activity,
+            activity_resource_types.get(activity, []),
+            object_type_colors,
+        )
+        viz.node(activities_map[activity], label=label, shape="box")
+
+    for object_type in ocpn["petri_nets"]:
+        object_type_color = object_type_colors.get(object_type, wo_decoration.ot_to_color(object_type))
+        net, initial_marking, final_marking = ocpn["petri_nets"][object_type]
+        place_diagnostics = {}
+        transition_diagnostics = {}
+        if object_type in ocpn["tbr_results"]:
+            place_diagnostics = ocpn["tbr_results"][object_type][0]
+            transition_diagnostics = ocpn["tbr_results"][object_type][1]
+
+        for place in net.places:
+            place_id = str(wo_decoration.uuid.uuid4())
+            places[place] = place_id
+            place_label = " "
+            place_shape = "circle"
+            place_fontcolor = None
+            place_fillcolor = object_type_color
+
+            if place in initial_marking:
+                place_label = object_type
+                place_shape = "ellipse"
+            elif place in final_marking:
+                place_label = object_type
+                place_shape = "underline"
+                place_fontcolor = object_type_color
+                place_fillcolor = None
+
+            if place in place_diagnostics and place_shape == "circle":
+                diagnostics = place_diagnostics[place]
+                place_shape = "ellipse"
+                place_label = "p=%d m=%d\nc=%d r=%d" % (
+                    diagnostics["p"],
+                    diagnostics["m"],
+                    diagnostics["c"],
+                    diagnostics["r"],
+                )
+
+            viz.node(
+                place_id,
+                label=place_label,
+                shape=place_shape,
+                style="filled" if place_fillcolor is not None else None,
+                fillcolor=place_fillcolor,
+                fontcolor=place_fontcolor,
+            )
+
+        for transition in net.transitions:
+            if transition.label is not None:
+                transition_map[transition] = activities_map[transition.label]
+            else:
+                transition_map[transition] = str(wo_decoration.uuid.uuid4())
+                viz.node(
+                    transition_map[transition],
+                    label=" ",
+                    shape="box",
+                    style="filled",
+                    fillcolor=object_type_color,
+                )
+
+        for arc in net.arcs:
+            arc_label = " "
+            if isinstance(arc.source, wo_decoration.PetriNet.Place):
+                is_double = (
+                    arc.target.label in ocpn["double_arcs_on_activity"][object_type]
+                    and ocpn["double_arcs_on_activity"][object_type][arc.target.label]
+                )
+                penwidth = "4.0" if is_double else "1.0"
+                if arc.target in transition_diagnostics:
+                    arc_label = str(transition_diagnostics[arc.target])
+                viz.edge(
+                    places[arc.source],
+                    transition_map[arc.target],
+                    color=object_type_color,
+                    penwidth=penwidth,
+                    label=arc_label,
+                )
+            elif isinstance(arc.source, wo_decoration.PetriNet.Transition):
+                is_double = (
+                    arc.source.label in ocpn["double_arcs_on_activity"][object_type]
+                    and ocpn["double_arcs_on_activity"][object_type][arc.source.label]
+                )
+                penwidth = "4.0" if is_double else "1.0"
+                if arc.source in transition_diagnostics:
+                    arc_label = str(transition_diagnostics[arc.source])
+                viz.edge(
+                    transition_map[arc.source],
+                    places[arc.target],
+                    color=object_type_color,
+                    penwidth=penwidth,
+                    label=arc_label,
+                )
+
+    viz.attr("graph", nodesep="0.1", ranksep="0.2")
+    viz.attr(rankdir=rankdir)
+    viz.format = image_format.replace("html", "plain-ext")
+    return viz
+
+
+def _render_ocpn_image(
+        ocpn,
+        max_size=(1400, 700),
+        object_type_colors=None,
+        activity_resource_types=None,
+):
     if ocpn is None:
         return None
 
-    gviz = ocpn_visualizer.apply(ocpn)
+    gviz = _build_ocpn_graphviz(
+        ocpn,
+        object_type_colors=object_type_colors,
+        activity_resource_types=activity_resource_types,
+    )
     image = Image.open(BytesIO(gviz.pipe(format="png"))).convert("RGBA")
     image = ImageOps.contain(image, max_size)
     return image
@@ -161,30 +396,106 @@ def _placeholder_model_image(text, size=(900, 220)):
     return image
 
 
-def _wrap_object_types_text(text, width=18):
-    parts = [part.strip() for part in text.split(",") if part.strip()]
+def _wrap_object_types(object_types, width=18):
+    parts = [part.strip() for part in object_types if part and part.strip()]
     if not parts:
-        return "None"
+        return [["None"]]
 
     wrapped_lines = []
-    current_line = ""
+    current_line = []
+    current_length = 0
+
     for part in parts:
-        candidate = part if not current_line else f"{current_line}, {part}"
-        if len(candidate) <= width:
-            current_line = candidate
-        else:
-            if current_line:
+        part_options = [part] if len(part) <= width else textwrap.wrap(part, width=width)
+        for option in part_options:
+            separator_length = 2 if current_line else 0
+            candidate_length = current_length + separator_length + len(option)
+            if current_line and candidate_length > width:
                 wrapped_lines.append(current_line)
-            if len(part) <= width:
-                current_line = part
+                current_line = [option]
+                current_length = len(option)
             else:
-                wrapped_lines.extend(textwrap.wrap(part, width=width))
-                current_line = ""
+                current_line.append(option)
+                current_length = candidate_length
 
     if current_line:
         wrapped_lines.append(current_line)
 
-    return "\n".join(wrapped_lines)
+    return wrapped_lines
+
+
+def _measure_object_type_boxes(
+        draw,
+        object_type_lines,
+        font,
+        spacing=14,
+        box_padding_x=16,
+        box_padding_y=10,
+        box_gap_x=12,
+):
+    if not object_type_lines:
+        return 0, 0
+
+    sample_bbox = draw.textbbox((0, 0), "Ag", font=font)
+    text_height = sample_bbox[3] - sample_bbox[1]
+    box_height = text_height + 2 * box_padding_y
+    max_width = 0
+
+    for line in object_type_lines:
+        line_width = 0
+        for index, object_type in enumerate(line):
+            text_bbox = draw.textbbox((0, 0), object_type, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            line_width += text_width + 2 * box_padding_x
+            if index < len(line) - 1:
+                line_width += box_gap_x
+        max_width = max(max_width, line_width)
+
+    total_height = len(object_type_lines) * box_height + max(0, len(object_type_lines) - 1) * spacing
+    return max_width, total_height
+
+
+def _draw_object_type_boxes(
+        draw,
+        position,
+        object_type_lines,
+        font,
+        object_type_colors,
+        spacing=14,
+        box_padding_x=16,
+        box_padding_y=10,
+        box_gap_x=12,
+        box_radius=16,
+):
+    x_start, y = position
+    sample_bbox = draw.textbbox((0, 0), "Ag", font=font)
+    text_height = sample_bbox[3] - sample_bbox[1]
+    box_height = text_height + 2 * box_padding_y
+
+    for line in object_type_lines:
+        x = x_start
+        for object_type in line:
+            text_bbox = draw.textbbox((0, 0), object_type, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            box_width = text_width + 2 * box_padding_x
+            box_fill = object_type_colors.get(object_type, "#dddddd")
+
+            draw.rounded_rectangle(
+                [(x, y), (x + box_width, y + box_height)],
+                radius=box_radius,
+                fill=box_fill,
+                outline="black",
+                width=2,
+            )
+            draw.text(
+                (x + box_padding_x, y + box_padding_y),
+                object_type,
+                fill="black",
+                font=font,
+            )
+            x += box_width + box_gap_x
+
+        y += box_height + spacing
 
 
 def visualize_hierarchy_with_models(
@@ -196,6 +507,8 @@ def visualize_hierarchy_with_models(
     if not solution:
         return None
 
+    discovered_models = discovered_models or {}
+
     title_font = _load_font(34)
     heading_font = _load_font(34)
     label_font = _load_font(28)
@@ -203,6 +516,10 @@ def visualize_hierarchy_with_models(
 
     layers = sorted(solution.values(), reverse=True)
     layers = list(dict.fromkeys(layers))
+    all_object_types = set(solution.keys())
+    for model_data in discovered_models.values():
+        all_object_types.update(model_data.get("object_types", []))
+    object_type_colors = _build_object_type_colors(all_object_types)
 
     text_panel_width = 900
     outer_padding = 30
@@ -219,20 +536,23 @@ def visualize_hierarchy_with_models(
     for layer in layers:
         model_data = discovered_models.get(layer, {})
         object_types = model_data.get("object_types", [])
-        object_types_text = _wrap_object_types_text(", ".join(object_types) if object_types else "None")
+        object_type_lines = _wrap_object_types(object_types)
         label_bbox = dummy_draw.textbbox((0, 0), "Object types:", font=label_font)
-        objects_bbox = dummy_draw.multiline_textbbox(
-            (0, 0),
-            object_types_text,
+        _, objects_height = _measure_object_type_boxes(
+            dummy_draw,
+            object_type_lines,
             font=object_font,
             spacing=14,
         )
         label_height = label_bbox[3] - label_bbox[1]
-        objects_height = objects_bbox[3] - objects_bbox[1]
         text_height = 40 + label_height + 22 + objects_height + 50
 
         try:
-            model_image = _render_ocpn_image(model_data.get("ocpn"))
+            model_image = _render_ocpn_image(
+                model_data.get("ocpn"),
+                object_type_colors=object_type_colors,
+                activity_resource_types=model_data.get("activity_resources"),
+            )
         except Exception:
             model_image = None
 
@@ -243,7 +563,7 @@ def visualize_hierarchy_with_models(
         row_height = max(text_height, model_image.height)
         row_data.append({
             "layer": layer,
-            "object_types_text": object_types_text,
+            "object_type_lines": object_type_lines,
             "model_image": model_image,
             "row_height": row_height,
         })
@@ -287,11 +607,12 @@ def visualize_hierarchy_with_models(
             font=label_font,
             spacing=12,
         )
-        draw.multiline_text(
+        _draw_object_type_boxes(
+            draw,
             (outer_padding + 18, heading_y + 92),
-            row["object_types_text"],
-            fill="black",
-            font=object_font,
+            row["object_type_lines"],
+            object_font,
+            object_type_colors,
             spacing=14,
         )
 
