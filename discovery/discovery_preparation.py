@@ -409,22 +409,28 @@ def _build_pruning_candidates(subprocess_components, included_activities, activi
     return candidates
 
 
-def _compute_information_loss(current_model, current_ocel, component):
+def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, component):
     return 1
 
 
-def _compute_simplicity_gain(current_model, current_ocel, component):
+def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, component):
     return 0
 
 
-def _select_best_pruning_candidate(current_model, current_ocel, candidates):
+def _select_best_pruning_candidate(current_model, current_ocel, lower_layer_ocel, candidates):
     best_candidate = None
     best_score = float("-inf")
 
     for candidate in candidates:
-        score = _compute_simplicity_gain(current_model, current_ocel, candidate) - _compute_information_loss(
+        score = _compute_simplicity_gain(
             current_model,
             current_ocel,
+            lower_layer_ocel,
+            candidate,
+        ) - _compute_information_loss(
+            current_model,
+            current_ocel,
+            lower_layer_ocel,
             candidate,
         )
         if score > best_score:
@@ -452,8 +458,12 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
     layer_context_by_layer = _normalize_layer_context(discovered_layers, layer_context)
 
     discovered_models = {}
-    for layer in discovered_layers:
+    for layer_index, layer in enumerate(discovered_layers):
         selected_object_types = layer_to_object_types[layer]
+        lower_layer_ocel = None
+        if layer_index > 0:
+            lower_layer = discovered_layers[layer_index - 1]
+            lower_layer_ocel = discovered_models[lower_layer]["ocel"]
         active_activities = {
             activity
             for activity, activity_layer in activity_to_layer.items()
@@ -483,6 +493,7 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
             best_candidate, best_score = _select_best_pruning_candidate(
                 ocpn,
                 layer_ocel,
+                lower_layer_ocel,
                 candidates,
             )
 

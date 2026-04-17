@@ -989,7 +989,12 @@ class SubprocessDetectionTests(unittest.TestCase):
     def test_layer_discovery_recomputes_final_components_after_pruning(self):
         ocel = _build_hierarchy_test_ocel()
 
-        def simplicity_gain(_, __, candidate):
+        def simplicity_gain(_, __, lower_layer_ocel, candidate):
+            self.assertIsNotNone(lower_layer_ocel)
+            self.assertEqual(
+                sorted(set(lower_layer_ocel.events["ocel:activity"].tolist())),
+                ["a", "b"],
+            )
             return 2 if tuple(candidate["activities"]) == ("a", "b") else 0
 
         with patch(
