@@ -59,6 +59,173 @@ def _discover_activity_resources(event_records, object_to_type, solution, refere
     return activity_resources
 
 
+def _build_layer_ocel(ocel, event_records, object_to_type, selected_object_types, selected_activities):
+    event_rows = []
+    relation_rows = []
+    used_objects = set()
+    included_event_records = []
+    included_activities = set()
+
+    for event_id, activity, timestamp, event_objects in event_records:
+        if activity not in selected_activities:
+            continue
+
+        selected_event_objects = [
+            obj for obj in event_objects
+            if object_to_type[obj] in selected_object_types
+        ]
+        if not selected_event_objects:
+            continue
+
+        included_event_records.append((event_id, activity, timestamp, event_objects))
+        included_activities.add(activity)
+        event_rows.append({
+            "ocel:eid": event_id,
+            "ocel:activity": activity,
+            "ocel:timestamp": timestamp,
+        })
+
+        for obj in dict.fromkeys(selected_event_objects):
+            used_objects.add(obj)
+            relation_rows.append({
+                "ocel:eid": event_id,
+                "ocel:activity": activity,
+                "ocel:timestamp": timestamp,
+                "ocel:oid": obj,
+                "ocel:type": object_to_type[obj],
+                "ocel:qualifier": None,
+            })
+
+    object_rows = [
+        {
+            "ocel:oid": obj,
+            "ocel:type": object_to_type[obj],
+        }
+        for obj in sorted(used_objects)
+    ]
+
+    o2o_rows = [
+        {
+            "ocel:oid": source_obj,
+            "ocel:oid_2": target_obj,
+            "ocel:qualifier": None,
+        }
+        for source_obj, target_obj in ocel.o2o_graph_edges
+        if source_obj in used_objects and target_obj in used_objects
+    ]
+
+    layer_ocel = OCEL(
+        events=pd.DataFrame(
+            event_rows,
+            columns=["ocel:eid", "ocel:activity", "ocel:timestamp"],
+        ),
+        objects=pd.DataFrame(
+            object_rows,
+            columns=["ocel:oid", "ocel:type"],
+        ),
+        relations=pd.DataFrame(
+            relation_rows,
+            columns=[
+                "ocel:eid",
+                "ocel:activity",
+                "ocel:timestamp",
+                "ocel:oid",
+                "ocel:type",
+                "ocel:qualifier",
+            ],
+        ),
+        o2o=pd.DataFrame(
+            o2o_rows,
+            columns=["ocel:oid", "ocel:oid_2", "ocel:qualifier"],
+        ),
+    )
+
+    return layer_ocel, included_event_records, sorted(included_activities)
+
+
+def _discover_ocpn_with_subprocess_components(layer_ocel, activity_to_layer, reference_layer):
+    if layer_ocel.events.empty or layer_ocel.relations.empty:
+        return None, []
+
+    ocpn = pm4py.discover_oc_petri_net(layer_ocel)
+    subprocess_components = detect_subprocess_components(
+        ocpn,
+        activity_to_layer,
+        reference_layer,
+    )
+    return ocpn, subprocess_components
+
+
+def _component_visible_activities(component):
+    return tuple(sorted({
+        transition["label"]
+        for transition in component.get("transitions", [])
+        if transition["kind"] == "activity" and transition["label"] is not None
+    }))
+
+
+def _build_pruning_candidates(subprocess_components, included_activities, activity_to_layer, reference_layer):
+    candidates = []
+    covered_lower_layer_activities = set()
+
+    for component in subprocess_components:
+        component_activities = tuple(
+            activity
+            for activity in _component_visible_activities(component)
+            if activity_to_layer.get(activity, float("inf")) < reference_layer
+        )
+        if not component_activities:
+            continue
+
+        candidates.append({
+            "kind": "subprocess",
+            "id": component["id"],
+            "activities": component_activities,
+            "component": component,
+        })
+        covered_lower_layer_activities.update(component_activities)
+
+    for activity in sorted(included_activities):
+        if activity_to_layer.get(activity, float("inf")) >= reference_layer:
+            continue
+        if activity in covered_lower_layer_activities:
+            continue
+
+        candidates.append({
+            "kind": "activity",
+            "id": activity,
+            "activities": (activity,),
+            "component": None,
+        })
+
+    return candidates
+
+
+def _compute_information_loss(current_model, current_ocel, component):
+    return 1
+
+
+def _compute_simplicity_gain(current_model, current_ocel, component):
+    return 0
+
+
+def _select_best_pruning_candidate(current_model, current_ocel, candidates):
+    best_candidate = None
+    best_score = float("-inf")
+
+    for candidate in candidates:
+        score = _compute_simplicity_gain(current_model, current_ocel, candidate) - _compute_information_loss(
+            current_model,
+            current_ocel,
+            candidate,
+        )
+        if score > best_score:
+            best_candidate = candidate
+            best_score = score
+
+    return best_candidate, best_score
+
+
 def discover_models_for_hierarchy(ocel, solution, layer_context=None):
     _, _, _, type_to_object = _prepare_totem_data(ocel)
 
@@ -97,65 +264,45 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
     discovered_models = {}
     for layer in discovered_layers:
         selected_object_types = layer_to_object_types[layer]
-        selected_activities = {
+        active_activities = {
             activity
             for activity, activity_layer in activity_to_layer.items()
             if activity_layer <= layer and layer - activity_layer <= layer_context_by_layer[layer]
         }
 
-        event_rows = []
-        relation_rows = []
-        used_objects = set()
-        included_event_records = []
-        included_activities = set()
+        while True:
+            layer_ocel, included_event_records, included_activities = _build_layer_ocel(
+                ocel,
+                event_records,
+                object_to_type,
+                selected_object_types,
+                active_activities,
+            )
+            ocpn, iteration_components = _discover_ocpn_with_subprocess_components(
+                layer_ocel,
+                activity_to_layer,
+                layer,
+            )
 
-        for event_id, activity, timestamp, event_objects in event_records:
-            if activity not in selected_activities:
-                continue
+            candidates = _build_pruning_candidates(
+                iteration_components,
+                included_activities,
+                activity_to_layer,
+                layer,
+            )
+            best_candidate, best_score = _select_best_pruning_candidate(
+                ocpn,
+                layer_ocel,
+                candidates,
+            )
 
-            selected_event_objects = [
-                obj for obj in event_objects
-                if object_to_type[obj] in selected_object_types
-            ]
-            if not selected_event_objects:
-                continue
+            if best_candidate is None or best_score <= 0:
+                break
 
-            included_event_records.append((event_id, activity, timestamp, event_objects))
-            included_activities.add(activity)
-            event_rows.append({
-                "ocel:eid": event_id,
-                "ocel:activity": activity,
-                "ocel:timestamp": timestamp,
-            })
-
-            for obj in dict.fromkeys(selected_event_objects):
-                used_objects.add(obj)
-                relation_rows.append({
-                    "ocel:eid": event_id,
-                    "ocel:activity": activity,
-                    "ocel:timestamp": timestamp,
-                    "ocel:oid": obj,
-                    "ocel:type": object_to_type[obj],
-                    "ocel:qualifier": None,
-                })
-
-        object_rows = [
-            {
-                "ocel:oid": obj,
-                "ocel:type": object_to_type[obj],
-            }
-            for obj in sorted(used_objects)
-        ]
-
-        o2o_rows = [
-            {
-                "ocel:oid": source_obj,
-                "ocel:oid_2": target_obj,
-                "ocel:qualifier": None,
-            }
-            for source_obj, target_obj in ocel.o2o_graph_edges
-            if source_obj in used_objects and target_obj in used_objects
-        ]
+            remaining_activities = active_activities - set(best_candidate["activities"])
+            if remaining_activities == active_activities:
+                break
+            active_activities = remaining_activities
 
         activity_resources = _discover_activity_resources(
             included_event_records,
@@ -163,43 +310,13 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
             solution,
             layer,
         )
-        included_activities = sorted(included_activities)
         highlighted_activities = sorted(
             activity
             for activity in included_activities
             if activity_to_layer[activity] == layer - 1
         )
-
-        layer_ocel = OCEL(
-            events=pd.DataFrame(
-                event_rows,
-                columns=["ocel:eid", "ocel:activity", "ocel:timestamp"],
-            ),
-            objects=pd.DataFrame(
-                object_rows,
-                columns=["ocel:oid", "ocel:type"],
-            ),
-            relations=pd.DataFrame(
-                relation_rows,
-                columns=[
-                    "ocel:eid",
-                    "ocel:activity",
-                    "ocel:timestamp",
-                    "ocel:oid",
-                    "ocel:type",
-                    "ocel:qualifier",
-                ],
-            ),
-            o2o=pd.DataFrame(
-                o2o_rows,
-                columns=["ocel:oid", "ocel:oid_2", "ocel:qualifier"],
-            ),
-        )
-
-        ocpn = None
         subprocess_components = []
-        if not layer_ocel.events.empty and not layer_ocel.relations.empty:
-            ocpn = pm4py.discover_oc_petri_net(layer_ocel)
+        if ocpn is not None:
             subprocess_components = detect_subprocess_components(
                 ocpn,
                 activity_to_layer,

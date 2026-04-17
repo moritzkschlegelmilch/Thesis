@@ -1,12 +1,16 @@
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
+import pandas as pd
 from pm4py.objects.petri_net.obj import Marking, PetriNet
 from pm4py.objects.petri_net.utils import petri_utils
 
+from repo.discovery.discovery_preparation import discover_models_for_hierarchy
 from repo.discovery.subprocess_detection import _build_component_colors, detect_subprocess_components
+from repo.discovery.totem import clear_totem_cache
 from repo.helpers.vorbose import _build_ocpn_graphviz
 
 
@@ -72,7 +76,66 @@ def _component_activity_sets(components):
     }
 
 
+class _FakeInputOCEL:
+    def __init__(self, object_to_type, events):
+        self.object_types = sorted(set(object_to_type.values()))
+        self.o2o_graph_edges = []
+        self._object_to_type = dict(object_to_type)
+        self._events = {
+            event["event_id"]: {
+                "activity": event["activity"],
+                "timestamp": event["timestamp"],
+                "event_objects": tuple(event["event_objects"]),
+            }
+            for event in events
+        }
+        self.events = pd.DataFrame({
+            "_eventId": [event["event_id"] for event in events],
+        })
+
+    def get_event_activity(self, event_id):
+        return self._events[event_id]["activity"]
+
+    def get_event_timestamp(self, event_id):
+        return self._events[event_id]["timestamp"]
+
+    def get_value(self, event_id, key):
+        if key != "event_objects":
+            raise KeyError(key)
+        return list(self._events[event_id]["event_objects"])
+
+    def get_event_objects_by_type(self, event_id, object_type):
+        return [
+            obj
+            for obj in self._events[event_id]["event_objects"]
+            if self._object_to_type.get(obj) == object_type
+        ]
+
+
+def _build_hierarchy_test_ocel():
+    object_to_type = {
+        "item_1": "item",
+        "item_2": "item",
+        "order_1": "order",
+        "order_2": "order",
+    }
+    events = [
+        {"event_id": "e1", "activity": "start", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
+        {"event_id": "e2", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:01:00"), "event_objects": ["item_1", "order_1"]},
+        {"event_id": "e3", "activity": "b", "timestamp": pd.Timestamp("2024-01-01T00:02:00"), "event_objects": ["item_1", "order_1"]},
+        {"event_id": "e4", "activity": "end", "timestamp": pd.Timestamp("2024-01-01T00:03:00"), "event_objects": ["item_1"]},
+        {"event_id": "e5", "activity": "start", "timestamp": pd.Timestamp("2024-01-02T00:00:00"), "event_objects": ["item_2"]},
+        {"event_id": "e6", "activity": "a", "timestamp": pd.Timestamp("2024-01-02T00:01:00"), "event_objects": ["item_2", "order_2"]},
+        {"event_id": "e7", "activity": "b", "timestamp": pd.Timestamp("2024-01-02T00:02:00"), "event_objects": ["item_2", "order_2"]},
+        {"event_id": "e8", "activity": "end", "timestamp": pd.Timestamp("2024-01-02T00:03:00"), "event_objects": ["item_2"]},
+    ]
+    return _FakeInputOCEL(object_to_type, events)
+
+
 class SubprocessDetectionTests(unittest.TestCase):
+    def tearDown(self):
+        clear_totem_cache()
+
     def test_component_palette_is_unique(self):
         colors = _build_component_colors(24)
         self.assertEqual(len(colors), len(set(colors)))
@@ -423,6 +486,45 @@ class SubprocessDetectionTests(unittest.TestCase):
         )
 
         self.assertIn('color="#123abc:#456def"', graphviz.source)
+
+    def test_layer_discovery_keeps_default_behavior_with_placeholder_scores(self):
+        ocel = _build_hierarchy_test_ocel()
+        _, discovered_models = discover_models_for_hierarchy(
+            ocel,
+            {"order": 1, "item": 2},
+        )
+
+        layer_two_model = discovered_models[2]
+
+        self.assertEqual(layer_two_model["activities"], ["a", "b", "end", "start"])
+        self.assertIn(
+            frozenset({"a", "b"}),
+            _component_activity_sets(layer_two_model["subprocess_components"]),
+        )
+
+    def test_layer_discovery_recomputes_final_components_after_pruning(self):
+        ocel = _build_hierarchy_test_ocel()
+
+        def simplicity_gain(_, __, candidate):
+            return 2 if tuple(candidate["activities"]) == ("a", "b") else 0
+
+        with patch(
+            "repo.discovery.discovery_preparation._compute_simplicity_gain",
+            side_effect=simplicity_gain,
+        ):
+            _, discovered_models = discover_models_for_hierarchy(
+                ocel,
+                {"order": 1, "item": 2},
+            )
+
+        layer_two_model = discovered_models[2]
+
+        self.assertEqual(layer_two_model["activities"], ["end", "start"])
+        self.assertEqual(layer_two_model["subprocess_components"], [])
+        self.assertEqual(
+            sorted(set(layer_two_model["ocel"].events["ocel:activity"].tolist())),
+            ["end", "start"],
+        )
 
 
 if __name__ == "__main__":
