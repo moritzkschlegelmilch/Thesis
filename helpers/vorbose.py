@@ -194,29 +194,49 @@ def _unique_colors(colors):
 
 def _build_subprocess_style_index(subprocess_components):
     transition_colors = defaultdict(list)
+    transition_fillcolors = defaultdict(list)
     place_colors = defaultdict(list)
+    place_fillcolors = defaultdict(list)
     arc_colors = defaultdict(list)
 
     for component in subprocess_components or []:
         color = component.get("color")
+        fillcolor = component.get("fillcolor")
         if not color:
+            color = fillcolor
+        if not color and not fillcolor:
             continue
 
         for transition_key in component.get("transition_keys", ()):
-            transition_colors[transition_key].append(color)
+            if color:
+                transition_colors[transition_key].append(color)
+            if fillcolor:
+                transition_fillcolors[transition_key].append(fillcolor)
         for place_key in component.get("place_keys", ()):
-            place_colors[place_key].append(color)
+            if color:
+                place_colors[place_key].append(color)
+            if fillcolor:
+                place_fillcolors[place_key].append(fillcolor)
         for arc_key in component.get("arc_keys", ()):
-            arc_colors[arc_key].append(color)
+            if color:
+                arc_colors[arc_key].append(color)
 
     return {
         "transitions": {
             key: _unique_colors(colors)
             for key, colors in transition_colors.items()
         },
+        "transition_fillcolors": {
+            key: _unique_colors(colors)
+            for key, colors in transition_fillcolors.items()
+        },
         "places": {
             key: _unique_colors(colors)
             for key, colors in place_colors.items()
+        },
+        "place_fillcolors": {
+            key: _unique_colors(colors)
+            for key, colors in place_fillcolors.items()
         },
         "arcs": {
             key: _unique_colors(colors)
@@ -315,6 +335,7 @@ def _build_ocpn_graphviz(
             object_type_colors,
         )
         activity_colors = subprocess_styles["transitions"].get(("activity", activity), ())
+        activity_fillcolors = subprocess_styles["transition_fillcolors"].get(("activity", activity), ())
         node_kwargs = {
             "label": label,
             "shape": "box",
@@ -322,6 +343,9 @@ def _build_ocpn_graphviz(
         if activity in highlighted_activities:
             node_kwargs["style"] = "filled"
             node_kwargs["fillcolor"] = "#f7d7a6"
+        if activity_fillcolors:
+            node_kwargs["style"] = "filled"
+            node_kwargs["fillcolor"] = activity_fillcolors[0]
         _apply_node_border(node_kwargs, _node_border_attributes(activity_colors))
         viz.node(activities_map[activity], **node_kwargs)
 
@@ -343,6 +367,7 @@ def _build_ocpn_graphviz(
             place_fillcolor = object_type_color
             place_key = _place_key(object_type, place)
             place_colors = subprocess_styles["places"].get(place_key, ())
+            place_highlight_fillcolors = subprocess_styles["place_fillcolors"].get(place_key, ())
 
             if place in initial_marking:
                 place_label = object_type
@@ -364,6 +389,8 @@ def _build_ocpn_graphviz(
                 )
 
             border_attributes = _node_border_attributes(place_colors)
+            if place_highlight_fillcolors:
+                place_fillcolor = place_highlight_fillcolors[0]
 
             node_kwargs = {
                 "label": place_label,
@@ -381,12 +408,13 @@ def _build_ocpn_graphviz(
             else:
                 transition_key = _transition_key(object_type, transition)
                 transition_colors = subprocess_styles["transitions"].get(transition_key, ())
+                transition_fillcolors = subprocess_styles["transition_fillcolors"].get(transition_key, ())
                 transition_map[transition] = str(wo_decoration.uuid.uuid4())
                 node_kwargs = {
                     "label": " ",
                     "shape": "box",
                     "style": "filled",
-                    "fillcolor": object_type_color,
+                    "fillcolor": transition_fillcolors[0] if transition_fillcolors else object_type_color,
                 }
                 _apply_node_border(node_kwargs, _node_border_attributes(transition_colors))
                 viz.node(

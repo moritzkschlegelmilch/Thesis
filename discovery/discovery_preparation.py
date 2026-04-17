@@ -9,6 +9,187 @@ from .totem import _prepare_totem_data, get_all_event_objects
 from .subprocess_detection import detect_subprocess_components
 
 
+def _ocel_event_id_column(ocel):
+    if "_eventId" in ocel.events.columns:
+        return "_eventId"
+    if "ocel:eid" in ocel.events.columns:
+        return "ocel:eid"
+    raise KeyError("Unsupported OCEL event id column.")
+
+
+def _iter_ocel_o2o_edges(ocel):
+    if hasattr(ocel, "o2o_graph_edges"):
+        return tuple(ocel.o2o_graph_edges)
+
+    o2o_df = getattr(ocel, "o2o", None)
+    if isinstance(o2o_df, pd.DataFrame) and {"ocel:oid", "ocel:oid_2"} <= set(o2o_df.columns):
+        return tuple(zip(o2o_df["ocel:oid"], o2o_df["ocel:oid_2"]))
+
+    return ()
+
+
+def _extract_ocel_filtering_context(ocel):
+    object_to_type = {}
+
+    objects_df = getattr(ocel, "objects", None)
+    if isinstance(objects_df, pd.DataFrame) and {"ocel:oid", "ocel:type"} <= set(objects_df.columns):
+        for object_id, object_type in zip(objects_df["ocel:oid"], objects_df["ocel:type"]):
+            object_to_type[object_id] = object_type
+    else:
+        _, _, _, type_to_object = _prepare_totem_data(ocel)
+        for object_type, objects in type_to_object.items():
+            for object_id in objects:
+                object_to_type[object_id] = object_type
+
+    event_records = []
+    event_id_column = _ocel_event_id_column(ocel)
+    relations_df = getattr(ocel, "relations", None)
+    relations_by_event = defaultdict(list)
+    if isinstance(relations_df, pd.DataFrame) and {"ocel:eid", "ocel:oid"} <= set(relations_df.columns):
+        for event_id, object_id in zip(relations_df["ocel:eid"], relations_df["ocel:oid"]):
+            if object_id in object_to_type:
+                relations_by_event[event_id].append(object_id)
+
+    event_ids = list(ocel.events[event_id_column])
+    if "ocel:activity" in ocel.events.columns:
+        activity_by_event = dict(zip(event_ids, ocel.events["ocel:activity"]))
+        timestamp_by_event = (
+            dict(zip(event_ids, ocel.events["ocel:timestamp"]))
+            if "ocel:timestamp" in ocel.events.columns
+            else {}
+        )
+
+        for event_id in event_ids:
+            event_objects = tuple(dict.fromkeys(relations_by_event.get(event_id, ())))
+            if not event_objects and hasattr(ocel, "get_value"):
+                event_objects = tuple(
+                    obj
+                    for obj in get_all_event_objects(ocel, event_id)
+                    if obj in object_to_type
+                )
+            if not event_objects:
+                continue
+
+            event_records.append((
+                event_id,
+                activity_by_event[event_id],
+                timestamp_by_event.get(event_id),
+                event_objects,
+            ))
+    else:
+        for event_id in event_ids:
+            event_objects = tuple(
+                obj
+                for obj in get_all_event_objects(ocel, event_id)
+                if obj in object_to_type
+            )
+            if not event_objects:
+                continue
+
+            event_records.append((
+                event_id,
+                ocel.get_event_activity(event_id),
+                ocel.get_event_timestamp(event_id),
+                event_objects,
+            ))
+
+    return object_to_type, event_records
+
+
+def _build_ocel_filtering_context(ocel):
+    object_to_type, event_records = _extract_ocel_filtering_context(ocel)
+    return {
+        "object_to_type": dict(object_to_type),
+        "event_records": tuple(event_records),
+        "o2o_edges": tuple(_iter_ocel_o2o_edges(ocel)),
+    }
+
+
+def _filter_ocel_filtering_context(filtering_context, selected_activities):
+    selected_activities = set(selected_activities)
+    filtered_event_records = tuple(
+        event_record
+        for event_record in filtering_context["event_records"]
+        if event_record[1] in selected_activities
+    )
+    used_objects = {
+        obj
+        for _, _, _, event_objects in filtered_event_records
+        for obj in event_objects
+    }
+    object_to_type = {
+        obj: filtering_context["object_to_type"][obj]
+        for obj in used_objects
+        if obj in filtering_context["object_to_type"]
+    }
+    o2o_edges = tuple(
+        (source_obj, target_obj)
+        for source_obj, target_obj in filtering_context["o2o_edges"]
+        if source_obj in used_objects and target_obj in used_objects
+    )
+    return {
+        "object_to_type": object_to_type,
+        "event_records": filtered_event_records,
+        "o2o_edges": o2o_edges,
+    }
+
+
+def _merge_ocel_filtering_contexts(*filtering_contexts):
+    merged_object_to_type = {}
+    merged_event_records = {}
+    merged_event_order = []
+    merged_event_object_sets = {}
+    merged_o2o_edges = []
+    seen_o2o_edges = set()
+
+    for filtering_context in filtering_contexts:
+        if not filtering_context:
+            continue
+
+        merged_object_to_type.update(filtering_context.get("object_to_type", {}))
+
+        for edge in filtering_context.get("o2o_edges", ()):
+            if edge in seen_o2o_edges:
+                continue
+            seen_o2o_edges.add(edge)
+            merged_o2o_edges.append(edge)
+
+        for event_id, activity, timestamp, event_objects in filtering_context.get("event_records", ()):
+            if event_id not in merged_event_records:
+                merged_event_records[event_id] = [activity, timestamp, []]
+                merged_event_object_sets[event_id] = set()
+                merged_event_order.append(event_id)
+            else:
+                current_activity, current_timestamp, _ = merged_event_records[event_id]
+                if current_activity is None:
+                    merged_event_records[event_id][0] = activity
+                if current_timestamp is None:
+                    merged_event_records[event_id][1] = timestamp
+
+            current_objects = merged_event_records[event_id][2]
+            current_object_set = merged_event_object_sets[event_id]
+            for obj in event_objects:
+                if obj in current_object_set:
+                    continue
+                current_object_set.add(obj)
+                current_objects.append(obj)
+
+    return {
+        "object_to_type": merged_object_to_type,
+        "event_records": tuple(
+            (
+                event_id,
+                merged_event_records[event_id][0],
+                merged_event_records[event_id][1],
+                tuple(merged_event_records[event_id][2]),
+            )
+            for event_id in merged_event_order
+            if merged_event_records[event_id][2]
+        ),
+        "o2o_edges": tuple(merged_o2o_edges),
+    }
+
+
 def _normalize_layer_context(discovered_layers, layer_context):
     if layer_context is None:
         return {layer: 1 for layer in discovered_layers}
@@ -110,7 +291,7 @@ def _build_layer_ocel(ocel, event_records, object_to_type, selected_object_types
             "ocel:oid_2": target_obj,
             "ocel:qualifier": None,
         }
-        for source_obj, target_obj in ocel.o2o_graph_edges
+        for source_obj, target_obj in _iter_ocel_o2o_edges(ocel)
         if source_obj in used_objects and target_obj in used_objects
     ]
 
@@ -143,17 +324,44 @@ def _build_layer_ocel(ocel, event_records, object_to_type, selected_object_types
     return layer_ocel, included_event_records, sorted(included_activities)
 
 
+def _build_ocel_from_filtering_context(filtering_context):
+    class _FilteringContextSource:
+        def __init__(self, o2o_edges):
+            self.o2o_graph_edges = tuple(o2o_edges)
+
+    source = _FilteringContextSource(filtering_context.get("o2o_edges", ()))
+    selected_object_types = set(filtering_context.get("object_to_type", {}).values())
+    selected_activities = {
+        activity
+        for _, activity, _, _ in filtering_context.get("event_records", ())
+    }
+    layer_ocel, _, _ = _build_layer_ocel(
+        source,
+        filtering_context.get("event_records", ()),
+        filtering_context.get("object_to_type", {}),
+        selected_object_types,
+        selected_activities,
+    )
+    return layer_ocel
+
+
 def _discover_ocpn_with_subprocess_components(layer_ocel, activity_to_layer, reference_layer):
-    if layer_ocel.events.empty or layer_ocel.relations.empty:
+    ocpn = _discover_ocpn(layer_ocel)
+    if ocpn is None:
         return None, []
 
-    ocpn = pm4py.discover_oc_petri_net(layer_ocel)
     subprocess_components = detect_subprocess_components(
         ocpn,
         activity_to_layer,
         reference_layer,
     )
     return ocpn, subprocess_components
+
+
+def _discover_ocpn(layer_ocel):
+    if layer_ocel.events.empty or layer_ocel.relations.empty:
+        return None
+    return pm4py.discover_oc_petri_net(layer_ocel)
 
 
 def _component_visible_activities(component):
@@ -227,36 +435,18 @@ def _select_best_pruning_candidate(current_model, current_ocel, candidates):
 
 
 def discover_models_for_hierarchy(ocel, solution, layer_context=None):
-    _, _, _, type_to_object = _prepare_totem_data(ocel)
-
-    object_to_type = {}
-    for obj_type, objects in type_to_object.items():
-        for obj in objects:
-            object_to_type[obj] = obj_type
-
-    event_records = []
+    object_to_type, event_records = _extract_ocel_filtering_context(ocel)
     activity_to_layer = {}
     layer_to_object_types = defaultdict(set)
 
     for obj_type, layer in solution.items():
         layer_to_object_types[layer].add(obj_type)
 
-    for event_id in ocel.events["_eventId"]:
-        activity = ocel.get_event_activity(event_id)
-        timestamp = ocel.get_event_timestamp(event_id)
-        event_objects = [
-            obj for obj in get_all_event_objects(ocel, event_id)
-            if obj in object_to_type
-        ]
-        if not event_objects:
-            continue
-
+    for event_id, activity, timestamp, event_objects in event_records:
         event_layer = min(solution[object_to_type[obj]] for obj in event_objects)
         current_layer = activity_to_layer.get(activity)
         if current_layer is None or event_layer < current_layer:
             activity_to_layer[activity] = event_layer
-
-        event_records.append((event_id, activity, timestamp, event_objects))
 
     discovered_layers = sorted(layer_to_object_types)
     layer_context_by_layer = _normalize_layer_context(discovered_layers, layer_context)
