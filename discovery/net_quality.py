@@ -13,6 +13,8 @@ from pm4py.objects.petri_net.obj import PetriNet
 Token = tuple[str, Any]
 PlaceKey = tuple[str, PetriNet.Place]
 ContextKey = tuple[tuple[str, tuple[tuple[tuple[str, ...], int], ...]], ...]
+VisibleTransitionKey = str
+SilentTransitionKey = tuple[str, str, str]
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,36 @@ class _EvaluationResult:
     fitness: float
 
 
+@dataclass(frozen=True)
+class _ComplexityStats:
+    place_visible_degree_sum: int
+    place_silent_degree_sum: int
+    visible_transition_sum: int
+    silent_transition_sum: int
+
+
+@dataclass
+class _ModelCache:
+    place_ids: dict[PlaceKey, int]
+    places_by_type: dict[str, tuple[PlaceKey, ...]]
+    initial_places_by_type: dict[str, tuple[PlaceKey, ...]]
+    silent_transitions: tuple[_LocalTransition, ...]
+    visible_combinations_by_label: dict[
+        str,
+        tuple[tuple[tuple[str, _LocalTransition], ...], ...],
+    ]
+    enabled_labels_cache: dict[tuple[Any, ...], frozenset[str]]
+    complexity_stats: _ComplexityStats
+
+
+@dataclass(frozen=True)
+class _PreparedLog:
+    ordered_event_ids: tuple[Any, ...]
+    enabled_log_activities: dict[ContextKey, frozenset[str]]
+    event_context_keys: dict[Any, ContextKey]
+    replay_events_by_context: dict[ContextKey, tuple[_ReplayEvent, ...]]
+
+
 class _ProgressReporter:
     def __init__(self, enabled: bool) -> None:
         self.enabled = enabled
@@ -93,7 +125,8 @@ class _ProgressReporter:
 
 class NetQuality:
     """
-    Replay-based fitness and precision for PM4Py object-centric Petri nets.
+    Replay-based fitness and precision plus structural complexity for PM4Py
+    object-centric Petri nets.
 
     Expects the OCPN dictionary returned by `pm4py.discover_oc_petri_net(...)`.
     An OCEL can be provided in the constructor or in `fitness()` / `precision()`.
@@ -118,22 +151,25 @@ class NetQuality:
         self.max_nodes_per_replay = max_nodes_per_replay
         self.show_progress = show_progress
 
-        self._double_arcs = ocpn.get("double_arcs_on_activity", {})
-        self._model_object_types = tuple(sorted(ocpn["petri_nets"]))
-        self._place_ids: dict[PlaceKey, int] = {}
-        self._places_by_type: dict[str, tuple[PlaceKey, ...]] = {}
-        self._initial_places_by_type: dict[str, tuple[PlaceKey, ...]] = {}
-        self._silent_transitions: tuple[_LocalTransition, ...] = ()
-        self._visible_combinations_by_label: dict[
-            str,
-            tuple[tuple[tuple[str, _LocalTransition], ...], ...],
-        ] = {}
-        self._enabled_labels_cache: dict[tuple[Any, ...], frozenset[str]] = {}
+        self._model_cache: _ModelCache | None = None
+        self._prepared_log_input: OCEL | None = None
+        self._prepared_log_cache: _PreparedLog | None = None
+        self._evaluation_cache_input: OCEL | None = None
+        self._evaluation_cache_result: _EvaluationResult | None = None
+        self._complexity_cache: dict[tuple[float, float], float] = {}
 
-        self._prepare_model()
-
-        self._cached_ocel: OCEL | None = None
-        self._cached_result: _EvaluationResult | None = None
+    def complexity(self, alpha: float = 2, beta: float = 2) -> float:
+        model_cache = self._ensure_model_cache()
+        cache_key = (alpha, beta)
+        if cache_key not in self._complexity_cache:
+            stats = model_cache.complexity_stats
+            self._complexity_cache[cache_key] = (
+                stats.place_visible_degree_sum
+                + alpha * stats.place_silent_degree_sum
+                + beta * stats.silent_transition_sum
+                + stats.visible_transition_sum
+            )
+        return self._complexity_cache[cache_key]
 
     def fitness(
         self,
@@ -151,23 +187,58 @@ class NetQuality:
     ) -> float:
         return self._evaluate(ocel, show_progress=show_progress).precision
 
-    def _prepare_model(self) -> None:
+    def _ensure_model_cache(self) -> _ModelCache:
+        if self._model_cache is None:
+            self._model_cache = self._build_model_cache()
+        return self._model_cache
+
+    def _build_model_cache(self) -> _ModelCache:
+        double_arcs = self.ocpn.get("double_arcs_on_activity", {})
+        model_object_types = tuple(sorted(self.ocpn["petri_nets"]))
+
+        place_ids: dict[PlaceKey, int] = {}
+        places_by_type: dict[str, tuple[PlaceKey, ...]] = {}
+        initial_places_by_type: dict[str, tuple[PlaceKey, ...]] = {}
+        silent_transitions: list[_LocalTransition] = []
         visible_parts_by_label: dict[str, dict[str, list[_LocalTransition]]] = defaultdict(
             lambda: defaultdict(list)
         )
-        silent_transitions: list[_LocalTransition] = []
 
-        for object_type in self._model_object_types:
+        merged_places = defaultdict(
+            lambda: {
+                "incoming_visible": set(),
+                "outgoing_visible": set(),
+                "incoming_silent": set(),
+                "outgoing_silent": set(),
+            }
+        )
+        merged_visible_transitions = defaultdict(
+            lambda: {
+                "pred_places": set(),
+                "succ_places": set(),
+                "object_types": set(),
+            }
+        )
+        merged_silent_transitions = defaultdict(
+            lambda: {
+                "pred_places": set(),
+                "succ_places": set(),
+                "object_types": set(),
+            }
+        )
+
+        for object_type in model_object_types:
             net, initial_marking, _ = self.ocpn["petri_nets"][object_type]
             place_keys = []
 
             for place in net.places:
                 place_key = (object_type, place)
-                self._place_ids[place_key] = len(self._place_ids)
+                place_ids[place_key] = len(place_ids)
                 place_keys.append(place_key)
+                merged_places[place_key]
 
-            self._places_by_type[object_type] = tuple(place_keys)
-            self._initial_places_by_type[object_type] = self._extract_initial_places(
+            places_by_type[object_type] = tuple(place_keys)
+            initial_places_by_type[object_type] = self._extract_initial_places(
                 object_type,
                 net,
                 initial_marking,
@@ -191,7 +262,7 @@ class NetQuality:
                     output_places=output_places,
                     variable=bool(
                         transition.label is not None
-                        and self._double_arcs.get(object_type, {}).get(
+                        and double_arcs.get(object_type, {}).get(
                             transition.label,
                             False,
                         )
@@ -205,17 +276,106 @@ class NetQuality:
                         local_transition
                     )
 
-        self._silent_transitions = tuple(silent_transitions)
+            for arc in net.arcs:
+                if isinstance(arc.source, PetriNet.Place):
+                    place_key = (object_type, arc.source)
+                    if arc.target.label is None:
+                        transition_key: VisibleTransitionKey | SilentTransitionKey = (
+                            "silent",
+                            object_type,
+                            arc.target.name,
+                        )
+                        merged_places[place_key]["outgoing_silent"].add(transition_key)
+                        merged_silent_transitions[transition_key]["pred_places"].add(
+                            place_key
+                        )
+                    else:
+                        transition_key = arc.target.label
+                        merged_places[place_key]["outgoing_visible"].add(transition_key)
+                        merged_visible_transitions[transition_key]["pred_places"].add(
+                            place_key
+                        )
+                else:
+                    place_key = (object_type, arc.target)
+                    if arc.source.label is None:
+                        transition_key = ("silent", object_type, arc.source.name)
+                        merged_places[place_key]["incoming_silent"].add(transition_key)
+                        merged_silent_transitions[transition_key]["succ_places"].add(
+                            place_key
+                        )
+                    else:
+                        transition_key = arc.source.label
+                        merged_places[place_key]["incoming_visible"].add(transition_key)
+                        merged_visible_transitions[transition_key]["succ_places"].add(
+                            place_key
+                        )
 
+        visible_combinations_by_label = {}
         for label, parts_by_type in visible_parts_by_label.items():
             ordered_parts = tuple(
                 (object_type, tuple(parts_by_type[object_type]))
                 for object_type in sorted(parts_by_type)
             )
-            self._visible_combinations_by_label[label] = tuple(
+            visible_combinations_by_label[label] = tuple(
                 tuple(zip((object_type for object_type, _ in ordered_parts), combination))
                 for combination in product(*(parts for _, parts in ordered_parts))
             )
+
+        for transition_info in merged_visible_transitions.values():
+            transition_info["object_types"] = {
+                place_key[0]
+                for place_key in (
+                    transition_info["pred_places"] | transition_info["succ_places"]
+                )
+            }
+
+        for transition_info in merged_silent_transitions.values():
+            transition_info["object_types"] = {
+                place_key[0]
+                for place_key in (
+                    transition_info["pred_places"] | transition_info["succ_places"]
+                )
+            }
+
+        place_visible_degree_sum = sum(
+            len(place_info["incoming_visible"]) + len(place_info["outgoing_visible"])
+            for place_info in merged_places.values()
+        )
+        place_silent_degree_sum = sum(
+            len(place_info["incoming_silent"]) + len(place_info["outgoing_silent"])
+            for place_info in merged_places.values()
+        )
+        visible_transition_sum = sum(
+            len(transition_info["object_types"])
+            * (
+                len(transition_info["pred_places"])
+                + len(transition_info["succ_places"])
+            )
+            for transition_info in merged_visible_transitions.values()
+        )
+        silent_transition_sum = sum(
+            len(transition_info["object_types"])
+            * (
+                len(transition_info["pred_places"])
+                + len(transition_info["succ_places"])
+            )
+            for transition_info in merged_silent_transitions.values()
+        )
+
+        return _ModelCache(
+            place_ids=place_ids,
+            places_by_type=places_by_type,
+            initial_places_by_type=initial_places_by_type,
+            silent_transitions=tuple(silent_transitions),
+            visible_combinations_by_label=visible_combinations_by_label,
+            enabled_labels_cache={},
+            complexity_stats=_ComplexityStats(
+                place_visible_degree_sum=place_visible_degree_sum,
+                place_silent_degree_sum=place_silent_degree_sum,
+                visible_transition_sum=visible_transition_sum,
+                silent_transition_sum=silent_transition_sum,
+            ),
+        )
 
     def _extract_initial_places(
         self,
@@ -250,17 +410,15 @@ class NetQuality:
                 "to fitness(ocel) / precision(ocel)."
             )
 
-        progress_enabled = self.show_progress if show_progress is None else show_progress
-        if (
-            self._cached_ocel is log
-            and self._cached_result is not None
-            and not progress_enabled
-        ):
-            return self._cached_result
+        self._ensure_model_cache()
 
+        if self._evaluation_cache_input is log and self._evaluation_cache_result is not None:
+            return self._evaluation_cache_result
+
+        progress_enabled = self.show_progress if show_progress is None else show_progress
         evaluation = self._compute_metrics(log, show_progress=progress_enabled)
-        self._cached_ocel = log
-        self._cached_result = evaluation
+        self._evaluation_cache_input = log
+        self._evaluation_cache_result = evaluation
         return evaluation
 
     def _compute_metrics(
@@ -271,15 +429,10 @@ class NetQuality:
     ) -> _EvaluationResult:
         reporter = _ProgressReporter(show_progress)
         reporter.phase("Preparing event contexts")
-        (
-            ordered_event_ids,
-            enabled_log_activities,
-            event_context_keys,
-            replay_events_by_context,
-        ) = self._prepare_log(ocel, reporter=reporter)
+        prepared_log = self._prepare_log(ocel, reporter=reporter)
 
         enabled_model_activities: dict[ContextKey, frozenset[str]] = {}
-        replay_items = list(replay_events_by_context.items())
+        replay_items = list(prepared_log.replay_events_by_context.items())
         reporter.phase("Replaying contexts")
         for index, (context_key, replay_events) in enumerate(replay_items, start=1):
             enabled_activities = set()
@@ -288,23 +441,27 @@ class NetQuality:
             enabled_model_activities[context_key] = frozenset(enabled_activities)
             reporter.step("Replaying contexts", index, len(replay_items))
 
-        if not ordered_event_ids:
+        if not prepared_log.ordered_event_ids:
             reporter.finish()
             return _EvaluationResult(precision=0.0, fitness=0.0)
 
         fitness_terms = []
         precision_terms = []
         reporter.phase("Aggregating scores")
-        for index, event_id in enumerate(ordered_event_ids, start=1):
-            context_key = event_context_keys[event_id]
-            enabled_log = enabled_log_activities[context_key]
+        for index, event_id in enumerate(prepared_log.ordered_event_ids, start=1):
+            context_key = prepared_log.event_context_keys[event_id]
+            enabled_log = prepared_log.enabled_log_activities[context_key]
             enabled_model = enabled_model_activities[context_key]
             overlap = enabled_log.intersection(enabled_model)
 
             fitness_terms.append(len(overlap) / len(enabled_log))
             if enabled_model:
                 precision_terms.append(len(overlap) / len(enabled_model))
-            reporter.step("Aggregating scores", index, len(ordered_event_ids))
+            reporter.step(
+                "Aggregating scores",
+                index,
+                len(prepared_log.ordered_event_ids),
+            )
 
         reporter.finish()
         return _EvaluationResult(
@@ -321,12 +478,10 @@ class NetQuality:
         ocel: OCEL,
         *,
         reporter: _ProgressReporter | None = None,
-    ) -> tuple[
-        list[Any],
-        dict[ContextKey, frozenset[str]],
-        dict[Any, ContextKey],
-        dict[ContextKey, tuple[_ReplayEvent, ...]],
-    ]:
+    ) -> _PreparedLog:
+        if self._prepared_log_input is ocel and self._prepared_log_cache is not None:
+            return self._prepared_log_cache
+
         events = ocel.events.copy()
         relations = ocel.relations.copy()
 
@@ -342,7 +497,7 @@ class NetQuality:
                 [timestamp_column, "_row_order"],
                 kind="stable",
             )
-        ordered_event_ids = events[event_id_column].tolist()
+        ordered_event_ids = tuple(events[event_id_column].tolist())
         event_position = {
             event_id: index
             for index, event_id in enumerate(ordered_event_ids)
@@ -411,7 +566,6 @@ class NetQuality:
         event_context_keys: dict[Any, ContextKey] = {}
         enabled_log_by_context: dict[ContextKey, set[str]] = defaultdict(set)
         replay_events_by_context: dict[ContextKey, list[_ReplayEvent]] = defaultdict(list)
-        total_events = len(ordered_event_ids)
 
         for index, event_id in enumerate(ordered_event_ids, start=1):
             preset = preset_by_event[event_id]
@@ -452,20 +606,24 @@ class NetQuality:
                 )
             )
             if reporter is not None:
-                reporter.step("Preparing event contexts", index, total_events)
+                reporter.step("Preparing event contexts", index, len(ordered_event_ids))
 
-        return (
-            ordered_event_ids,
-            {
+        prepared_log = _PreparedLog(
+            ordered_event_ids=ordered_event_ids,
+            enabled_log_activities={
                 context_key: frozenset(activities)
                 for context_key, activities in enabled_log_by_context.items()
             },
-            event_context_keys,
-            {
+            event_context_keys=event_context_keys,
+            replay_events_by_context={
                 context_key: tuple(replay_events)
                 for context_key, replay_events in replay_events_by_context.items()
             },
         )
+
+        self._prepared_log_input = ocel
+        self._prepared_log_cache = prepared_log
+        return prepared_log
 
     def _context_key(
         self,
@@ -535,13 +693,14 @@ class NetQuality:
         self,
         context_tokens_by_type: tuple[tuple[str, tuple[Token, ...]], ...],
     ) -> dict[PlaceKey, set[Token]] | None:
+        model_cache = self._ensure_model_cache()
         state: dict[PlaceKey, set[Token]] = {}
 
         for object_type, tokens in context_tokens_by_type:
             if not tokens:
                 continue
 
-            initial_places = self._initial_places_by_type.get(object_type, ())
+            initial_places = model_cache.initial_places_by_type.get(object_type, ())
             if not initial_places:
                 return None
 
@@ -555,7 +714,8 @@ class NetQuality:
         state: dict[PlaceKey, set[Token]],
         binding_step: _BindingStep,
     ) -> list[dict[PlaceKey, set[Token]]]:
-        combinations = self._visible_combinations_by_label.get(binding_step.label, ())
+        model_cache = self._ensure_model_cache()
+        combinations = model_cache.visible_combinations_by_label.get(binding_step.label, ())
         if not combinations:
             return []
 
@@ -627,9 +787,10 @@ class NetQuality:
         self,
         state: dict[PlaceKey, set[Token]],
     ) -> list[dict[PlaceKey, set[Token]]]:
+        model_cache = self._ensure_model_cache()
         successor_states: dict[tuple[Any, ...], dict[PlaceKey, set[Token]]] = {}
 
-        for local_transition in self._silent_transitions:
+        for local_transition in model_cache.silent_transitions:
             candidate_tokens = self._shared_tokens(state, local_transition)
             if not candidate_tokens:
                 continue
@@ -664,20 +825,21 @@ class NetQuality:
             state.setdefault(place, set()).update(tokens)
 
     def _enabled_visible_labels(self, state: dict[PlaceKey, set[Token]]) -> frozenset[str]:
+        model_cache = self._ensure_model_cache()
         state_key = self._state_key(state)
-        if state_key in self._enabled_labels_cache:
-            return self._enabled_labels_cache[state_key]
+        if state_key in model_cache.enabled_labels_cache:
+            return model_cache.enabled_labels_cache[state_key]
 
         enabled_labels = set()
-        for label, combinations in self._visible_combinations_by_label.items():
+        for label, combinations in model_cache.visible_combinations_by_label.items():
             for combination in combinations:
                 if self._combination_has_enabled_binding(state, combination):
                     enabled_labels.add(label)
                     break
 
-        enabled_labels = frozenset(enabled_labels)
-        self._enabled_labels_cache[state_key] = enabled_labels
-        return enabled_labels
+        enabled_labels_frozen = frozenset(enabled_labels)
+        model_cache.enabled_labels_cache[state_key] = enabled_labels_frozen
+        return enabled_labels_frozen
 
     def _combination_has_enabled_binding(
         self,
@@ -695,6 +857,8 @@ class NetQuality:
         state: dict[PlaceKey, set[Token]],
         local_transition: _LocalTransition,
     ) -> set[Token]:
+        model_cache = self._ensure_model_cache()
+
         if local_transition.input_places:
             token_sets = [state.get(place, set()) for place in local_transition.input_places]
             if not token_sets:
@@ -705,7 +869,7 @@ class NetQuality:
             return shared_tokens
 
         shared_tokens = set()
-        for place in self._places_by_type.get(local_transition.object_type, ()):
+        for place in model_cache.places_by_type.get(local_transition.object_type, ()):
             shared_tokens.update(state.get(place, set()))
         return shared_tokens
 
@@ -721,13 +885,14 @@ class NetQuality:
         return True
 
     def _state_key(self, state: dict[PlaceKey, set[Token]]) -> tuple[Any, ...]:
+        model_cache = self._ensure_model_cache()
         encoded_places = []
         for place, tokens in state.items():
             if not tokens:
                 continue
             encoded_places.append(
                 (
-                    self._place_ids[place],
+                    model_cache.place_ids[place],
                     tuple(sorted(tokens, key=lambda token: (token[0], str(token[1])))),
                 )
             )

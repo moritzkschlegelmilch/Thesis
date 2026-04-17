@@ -14,6 +14,53 @@ from pm4py.objects.petri_net.utils import petri_utils
 from repo.discovery.net_quality import NetQuality
 
 
+def _build_net(name, places, transitions, arcs):
+    net = PetriNet(name)
+    place_nodes = {}
+    transition_nodes = {}
+
+    for place_name in places:
+        place = PetriNet.Place(place_name)
+        net.places.add(place)
+        place_nodes[place_name] = place
+
+    for transition_name, transition_label in transitions.items():
+        transition = PetriNet.Transition(transition_name, transition_label)
+        net.transitions.add(transition)
+        transition_nodes[transition_name] = transition
+
+    nodes = {}
+    nodes.update(place_nodes)
+    nodes.update(transition_nodes)
+
+    for source_name, target_name in arcs:
+        petri_utils.add_arc_from_to(nodes[source_name], nodes[target_name], net)
+
+    return net
+
+
+def _build_ocpn(nets_by_object_type):
+    activities = sorted({
+        transition.label
+        for net in nets_by_object_type.values()
+        for transition in net.transitions
+        if transition.label is not None
+    })
+
+    return {
+        "activities": activities,
+        "petri_nets": {
+            object_type: (net, Marking(), Marking())
+            for object_type, net in nets_by_object_type.items()
+        },
+        "tbr_results": {},
+        "double_arcs_on_activity": {
+            object_type: {}
+            for object_type in nets_by_object_type
+        },
+    }
+
+
 def _build_single_type_ocel(traces, object_type="order"):
     base_timestamp = pd.Timestamp("2024-01-01 00:00:00")
     event_rows = []
@@ -198,6 +245,56 @@ class NetQualityTests(unittest.TestCase):
         self.assertIn("Replaying contexts", output)
         self.assertIn("Aggregating scores", output)
         self.assertIn("Done.", output)
+
+    def test_complexity_for_single_type_net(self):
+        quality = NetQuality(_build_restrictive_ocpn())
+
+        self.assertEqual(quality.complexity(), 12)
+
+    def test_complexity_merges_visible_transitions_like_pm4py(self):
+        item_net = _build_net(
+            "item",
+            places=["item_in", "item_out"],
+            transitions={"pack_item": "pack"},
+            arcs=[
+                ("item_in", "pack_item"),
+                ("pack_item", "item_out"),
+            ],
+        )
+        order_net = _build_net(
+            "order",
+            places=["order_in", "order_out"],
+            transitions={"pack_order": "pack"},
+            arcs=[
+                ("order_in", "pack_order"),
+                ("pack_order", "order_out"),
+            ],
+        )
+
+        quality = NetQuality(_build_ocpn({"item": item_net, "order": order_net}))
+
+        self.assertEqual(quality.complexity(), 12)
+
+    def test_complexity_uses_beta_for_silent_transitions(self):
+        silent_net = _build_net(
+            "order",
+            places=["start", "mid", "end"],
+            transitions={
+                "tau": None,
+                "a": "a",
+            },
+            arcs=[
+                ("start", "tau"),
+                ("tau", "mid"),
+                ("mid", "a"),
+                ("a", "end"),
+            ],
+        )
+
+        quality = NetQuality(_build_ocpn({"order": silent_net}))
+
+        self.assertEqual(quality.complexity(), 12)
+        self.assertEqual(quality.complexity(alpha=2, beta=3), 14)
 
 
 if __name__ == "__main__":

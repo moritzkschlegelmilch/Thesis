@@ -15,7 +15,7 @@ from repo.discovery.component_deletion_impact import (
     calculate_component_deletion_impact_footprint,
     discover_component_and_edge_ocpns,
 )
-from repo.discovery.discovery_preparation import discover_models_for_hierarchy
+from repo.discovery.discovery_preparation import _compute_information_loss, discover_models_for_hierarchy
 from repo.discovery.subprocess_detection import (
     _build_component_colors,
     _arc_key,
@@ -550,6 +550,46 @@ class SubprocessDetectionTests(unittest.TestCase):
         self.assertEqual(_ocpn_object_types(component_and_edge_ocpn), {"item", "order"})
         self.assertEqual(_ocpn_activities(edge_only_ocpn), {"a", "b", "x", "y"})
         self.assertEqual(_ocpn_object_types(edge_only_ocpn), {"item", "order"})
+
+    def test_compute_information_loss_uses_precision_ratio(self):
+        fake_ocel = _FakeInputOCEL(
+            {"item_1": "item"},
+            [
+                {"event_id": "e1", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
+            ],
+        )
+        with_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
+        without_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
+
+        def net_quality_side_effect(ocpn, ocel):
+            self.assertIs(ocel, fake_ocel)
+            quality = unittest.mock.Mock()
+            if ocpn is with_ocpn:
+                quality.precision.return_value = 0.8
+                return quality
+            if ocpn is without_ocpn:
+                quality.precision.return_value = 0.4
+                return quality
+            raise AssertionError("Unexpected OCPN")
+
+        with patch(
+            "repo.discovery.component_deletion_impact.discover_component_and_edge_ocpns",
+            return_value=(with_ocpn, without_ocpn),
+        ), patch(
+            "repo.discovery.component_deletion_impact._build_component_and_edge_ocels",
+            return_value=(fake_ocel, fake_ocel),
+        ), patch(
+            "repo.discovery.net_quality.NetQuality",
+            side_effect=net_quality_side_effect,
+        ):
+            information_loss = _compute_information_loss(
+                current_model=object(),
+                current_ocel=fake_ocel,
+                lower_layer_ocel=None,
+                component={"activities": ("a", "b")},
+            )
+
+        self.assertEqual(information_loss, 0.5)
 
     def test_build_component_deletion_highlight_marks_union_across_object_types(self):
         item_net = _build_net(

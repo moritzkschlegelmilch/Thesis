@@ -410,7 +410,44 @@ def _build_pruning_candidates(subprocess_components, included_activities, activi
 
 
 def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, component):
-    return 1
+    component_activities = tuple(component.get("activities", ()))
+    if current_model is None or current_ocel is None or not component_activities:
+        return 1
+
+    from .component_deletion_impact import (
+        _build_component_and_edge_ocels,
+        discover_component_and_edge_ocpns,
+    )
+    from .net_quality import NetQuality
+
+    component_and_edge_ocpn, edge_only_ocpn = discover_component_and_edge_ocpns(
+        current_ocel,
+        current_model,
+        component_activities,
+        lower_layer_ocel=lower_layer_ocel,
+    )
+    component_and_edge_ocel, _ = _build_component_and_edge_ocels(
+        current_ocel,
+        current_model,
+        component_activities,
+        lower_layer_ocel=lower_layer_ocel,
+    )
+
+    precision_with_component = 0.0
+    if component_and_edge_ocpn is not None and component_and_edge_ocel is not None:
+        precision_with_component = float(
+            NetQuality(component_and_edge_ocpn, component_and_edge_ocel).precision()
+        )
+    if precision_with_component <= 0:
+        return 1
+
+    precision_without_component = 0.0
+    if edge_only_ocpn is not None:
+        precision_without_component = float(
+            NetQuality(edge_only_ocpn, component_and_edge_ocel).precision()
+        )
+    information_loss = 1 - (precision_without_component / precision_with_component)
+    return max(0.0, information_loss)
 
 
 def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, component):

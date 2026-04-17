@@ -162,7 +162,7 @@ def calculate_ocpn_component_deletion_impact(ocpn, component_activity_labels):
     return impact_labels
 
 
-def discover_component_and_edge_ocpns(ocel, ocpn, component_activity_labels, lower_layer_ocel=None):
+def _build_component_and_edge_ocels(ocel, ocpn, component_activity_labels, lower_layer_ocel=None):
     component_labels = frozenset(_normalized_component_labels(component_activity_labels))
     if not component_labels:
         return None, None
@@ -187,9 +187,7 @@ def discover_component_and_edge_ocpns(ocel, ocpn, component_activity_labels, low
         upper_component_and_edge_context,
         lower_component_and_edge_context,
     )
-    component_and_edge_ocpn = _discover_ocpn(
-        _build_ocel_from_filtering_context(component_and_edge_context)
-    )
+    component_and_edge_ocel = _build_ocel_from_filtering_context(component_and_edge_context)
 
     upper_edge_only_context = _filter_ocel_filtering_context(
         upper_context,
@@ -199,9 +197,19 @@ def discover_component_and_edge_ocpns(ocel, ocpn, component_activity_labels, low
         upper_edge_only_context,
         lower_component_and_edge_context,
     )
-    edge_only_ocpn = _discover_ocpn(
-        _build_ocel_from_filtering_context(right_union_context)
+    edge_only_ocel = _build_ocel_from_filtering_context(right_union_context)
+    return component_and_edge_ocel, edge_only_ocel
+
+
+def discover_component_and_edge_ocpns(ocel, ocpn, component_activity_labels, lower_layer_ocel=None):
+    component_and_edge_ocel, edge_only_ocel = _build_component_and_edge_ocels(
+        ocel,
+        ocpn,
+        component_activity_labels,
+        lower_layer_ocel=lower_layer_ocel,
     )
+    component_and_edge_ocpn = _discover_ocpn(component_and_edge_ocel)
+    edge_only_ocpn = _discover_ocpn(edge_only_ocel)
     return component_and_edge_ocpn, edge_only_ocpn
 
 
