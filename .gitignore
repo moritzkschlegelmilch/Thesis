@@ -7,3 +7,4 @@ tests/
 !tests/
 tests/*
 !tests/test_subprocess_detection.py
+!tests/test_net_quality.py
