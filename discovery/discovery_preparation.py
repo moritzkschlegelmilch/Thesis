@@ -6,7 +6,7 @@ import pm4py
 from pm4py.objects.ocel.obj import OCEL
 
 from .totem import _prepare_totem_data, get_all_event_objects
-from .subprocess_detection import detect_subprocess_components
+from .subprocess_detection import collapse_sub_processes, detect_subprocess_components
 
 
 def _ocel_event_id_column(ocel):
@@ -440,7 +440,7 @@ def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, com
                 component_and_edge_ocpn,
                 component_and_edge_ocel,
                 max_nodes_per_replay=100,
-            ).precision(show_progress=True)
+            ).precision()
         )
 
     precision_without_component = 0.0
@@ -450,9 +450,10 @@ def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, com
                 edge_only_ocpn,
                 component_and_edge_ocel,
                 max_nodes_per_replay=10
-            ).precision(show_progress=True)
+            ).precision()
         )
     information_loss = 1 - (precision_without_component / precision_with_component)
+
     return information_loss
 
 
@@ -470,10 +471,39 @@ def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, comp
         component_activities,
         lower_layer_ocel=lower_layer_ocel,
     )
+
     if component_and_edge_ocpn is None:
         return 0
 
-    complexity_with_component = float(NetQuality(component_and_edge_ocpn).complexity())
+    complexity_with_component_ocpn = component_and_edge_ocpn
+    if component.get("kind") == "subprocess":
+        activity_to_layer = {
+            activity: 1 if activity in component_activities else 2
+            for activity in component_and_edge_ocpn.get("activities", ())
+        }
+        collapsed_components = detect_subprocess_components(
+            component_and_edge_ocpn,
+            activity_to_layer,
+            reference_layer=2,
+        )
+        matching_components = [
+            candidate_component
+            for candidate_component in collapsed_components
+            if set(_component_visible_activities(candidate_component)) == set(component_activities)
+        ]
+        if matching_components:
+            matching_components.sort(
+                key=lambda candidate_component: (
+                    -len(candidate_component.get("transition_keys", ())),
+                    -len(candidate_component.get("place_keys", ())),
+                ),
+            )
+            complexity_with_component_ocpn, _ = collapse_sub_processes(
+                component_and_edge_ocpn,
+                [matching_components[0]],
+            )
+
+    complexity_with_component = float(NetQuality(complexity_with_component_ocpn).complexity())
     complexity_without_component = 0.0
     if edge_only_ocpn is not None:
         complexity_without_component = float(NetQuality(edge_only_ocpn).complexity())
@@ -498,6 +528,7 @@ def _select_best_pruning_candidate(current_model, current_ocel, lower_layer_ocel
             lower_layer_ocel,
             candidate,
         )
+
         if score > best_score:
             best_candidate = candidate
             best_score = score

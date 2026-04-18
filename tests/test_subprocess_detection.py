@@ -5,6 +5,7 @@ from unittest.mock import patch
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
 import pandas as pd
+from PIL import Image
 from pm4py.objects.petri_net.obj import Marking, PetriNet
 from pm4py.objects.petri_net.utils import petri_utils
 
@@ -24,10 +25,16 @@ from repo.discovery.subprocess_detection import (
     _build_component_colors,
     _arc_key,
     _place_key,
+    _transition_key,
+    collapse_sub_processes,
     detect_subprocess_components,
 )
 from repo.discovery.totem import clear_totem_cache
-from repo.helpers.vorbose import _build_ocpn_graphviz
+from repo.helpers.vorbose import (
+    _build_ocpn_graphviz,
+    _render_model_image_for_hierarchy_row,
+    render_collapsed_sub_processes,
+)
 
 
 def _build_net(name, places, transitions, arcs):
@@ -635,6 +642,73 @@ class SubprocessDetectionTests(unittest.TestCase):
 
         self.assertEqual(simplicity_gain, 0.75)
 
+    def test_compute_simplicity_gain_collapses_subprocess_before_measuring_with_component(self):
+        with_ocpn = {
+            "activities": ["a", "b", "x"],
+            "petri_nets": {"item": (object(), object(), object())},
+        }
+        collapsed_with_ocpn = {
+            "activities": ["subprocess_1", "x"],
+            "petri_nets": {"item": (object(), object(), object())},
+        }
+        without_ocpn = {
+            "activities": ["x"],
+            "petri_nets": {"item": (object(), object(), object())},
+        }
+
+        local_subprocess_component = {
+            "id": "subprocess_1",
+            "transition_keys": (("activity", "a"), ("activity", "b")),
+            "place_keys": (),
+            "arc_keys": (),
+            "transitions": [
+                {"kind": "activity", "label": "a"},
+                {"kind": "activity", "label": "b"},
+            ],
+        }
+
+        def net_quality_side_effect(ocpn, ocel=None):
+            quality = unittest.mock.Mock()
+            if ocpn is collapsed_with_ocpn:
+                quality.complexity.return_value = 8.0
+                return quality
+            if ocpn is without_ocpn:
+                quality.complexity.return_value = 2.0
+                return quality
+            raise AssertionError("Unexpected OCPN")
+
+        with patch(
+            "repo.discovery.component_deletion_impact.discover_component_and_edge_ocpns",
+            return_value=(with_ocpn, without_ocpn),
+        ), patch(
+            "repo.discovery.discovery_preparation.detect_subprocess_components",
+            return_value=[local_subprocess_component],
+        ) as detect_patch, patch(
+            "repo.discovery.discovery_preparation.collapse_sub_processes",
+            return_value=(collapsed_with_ocpn, frozenset()),
+        ) as collapse_patch, patch(
+            "repo.discovery.net_quality.NetQuality",
+            side_effect=net_quality_side_effect,
+        ):
+            simplicity_gain = _compute_simplicity_gain(
+                current_model=object(),
+                current_ocel=object(),
+                lower_layer_ocel=None,
+                component={
+                    "kind": "subprocess",
+                    "activities": ("a", "b"),
+                    "component": {"id": "subprocess_1"},
+                },
+            )
+
+        detect_patch.assert_called_once_with(
+            with_ocpn,
+            {"a": 1, "b": 1, "x": 2},
+            reference_layer=2,
+        )
+        collapse_patch.assert_called_once_with(with_ocpn, [local_subprocess_component])
+        self.assertEqual(simplicity_gain, 0.75)
+
     def test_build_component_deletion_highlight_marks_union_across_object_types(self):
         item_net = _build_net(
             "item",
@@ -763,6 +837,316 @@ class SubprocessDetectionTests(unittest.TestCase):
         self.assertEqual(_activity_labels(components[0]), {"pack", "ship"})
         self.assertEqual(len(components[0]["place_keys"]), 5)
         self.assertEqual(len(components[0]["arc_keys"]), 6)
+
+    def test_collapse_sub_processes_replaces_single_type_component_with_boundary_transition(self):
+        item_net = _build_net(
+            "item",
+            places=["in", "mid", "out"],
+            transitions={
+                "start": "start",
+                "a": "a",
+                "b": "b",
+                "end": "end",
+            },
+            arcs=[
+                ("start", "in"),
+                ("in", "a"),
+                ("a", "mid"),
+                ("mid", "b"),
+                ("b", "out"),
+                ("out", "end"),
+            ],
+        )
+
+        ocpn = _build_ocpn({"item": item_net})
+        components = detect_subprocess_components(
+            ocpn,
+            {
+                "start": 2,
+                "a": 1,
+                "b": 1,
+                "end": 2,
+            },
+            reference_layer=2,
+        )
+
+        collapsed_ocpn, inserted_transitions = collapse_sub_processes(ocpn, components)
+
+        self.assertEqual(len(inserted_transitions), 1)
+        object_type, collapsed_transition = next(iter(inserted_transitions))
+        self.assertEqual(object_type, "item")
+        self.assertEqual(collapsed_transition.label, "subprocess_1")
+
+        collapsed_net, _, _ = collapsed_ocpn["petri_nets"]["item"]
+        self.assertEqual(
+            {place.name for place in collapsed_net.places},
+            {"in", "out"},
+        )
+        self.assertEqual(
+            {transition.label for transition in collapsed_net.transitions},
+            {"start", "subprocess_1", "end"},
+        )
+        self.assertEqual(
+            {arc.source.name for arc in collapsed_transition.in_arcs},
+            {"in"},
+        )
+        self.assertEqual(
+            {arc.target.name for arc in collapsed_transition.out_arcs},
+            {"out"},
+        )
+        self.assertEqual(
+            {transition.label for transition in item_net.transitions},
+            {"start", "a", "b", "end"},
+        )
+
+    def test_collapse_sub_processes_replaces_multi_type_component_in_each_net(self):
+        item_net = _build_net(
+            "item",
+            places=["item_in", "item_mid", "item_out"],
+            transitions={
+                "start_item": "start_item",
+                "pack_item": "pack",
+                "ship_item": "ship",
+                "end_item": "end_item",
+            },
+            arcs=[
+                ("start_item", "item_in"),
+                ("item_in", "pack_item"),
+                ("pack_item", "item_mid"),
+                ("item_mid", "ship_item"),
+                ("ship_item", "item_out"),
+                ("item_out", "end_item"),
+            ],
+        )
+        order_net = _build_net(
+            "order",
+            places=["order_in", "order_out"],
+            transitions={
+                "start_order": "start_order",
+                "pack_order": "pack",
+                "end_order": "end_order",
+            },
+            arcs=[
+                ("start_order", "order_in"),
+                ("order_in", "pack_order"),
+                ("pack_order", "order_out"),
+                ("order_out", "end_order"),
+            ],
+        )
+
+        ocpn = _build_ocpn({
+            "item": item_net,
+            "order": order_net,
+        })
+        components = detect_subprocess_components(
+            ocpn,
+            {
+                "start_item": 2,
+                "pack": 1,
+                "ship": 1,
+                "end_item": 2,
+                "start_order": 2,
+                "end_order": 2,
+            },
+            reference_layer=2,
+        )
+
+        collapsed_ocpn, inserted_transitions = collapse_sub_processes(ocpn, components)
+
+        inserted_by_type = {
+            object_type: transition
+            for object_type, transition in inserted_transitions
+        }
+        self.assertEqual(set(inserted_by_type), {"item", "order"})
+        self.assertEqual(
+            {transition.label for transition in inserted_by_type.values()},
+            {"subprocess_1"},
+        )
+        self.assertEqual(
+            set(collapsed_ocpn["activities"]),
+            {"start_item", "start_order", "subprocess_1", "end_item", "end_order"},
+        )
+
+        collapsed_item_net, _, _ = collapsed_ocpn["petri_nets"]["item"]
+        self.assertEqual(
+            {place.name for place in collapsed_item_net.places},
+            {"item_in", "item_out"},
+        )
+        self.assertEqual(
+            {transition.label for transition in collapsed_item_net.transitions},
+            {"start_item", "subprocess_1", "end_item"},
+        )
+        self.assertEqual(
+            {arc.source.name for arc in inserted_by_type["item"].in_arcs},
+            {"item_in"},
+        )
+        self.assertEqual(
+            {arc.target.name for arc in inserted_by_type["item"].out_arcs},
+            {"item_out"},
+        )
+
+        collapsed_order_net, _, _ = collapsed_ocpn["petri_nets"]["order"]
+        self.assertEqual(
+            {place.name for place in collapsed_order_net.places},
+            {"order_in", "order_out"},
+        )
+        self.assertEqual(
+            {transition.label for transition in collapsed_order_net.transitions},
+            {"start_order", "subprocess_1", "end_order"},
+        )
+        self.assertEqual(
+            {arc.source.name for arc in inserted_by_type["order"].in_arcs},
+            {"order_in"},
+        )
+        self.assertEqual(
+            {arc.target.name for arc in inserted_by_type["order"].out_arcs},
+            {"order_out"},
+        )
+
+    def test_render_collapsed_sub_processes_highlights_inserted_transition(self):
+        item_net = _build_net(
+            "item",
+            places=["in", "mid", "out"],
+            transitions={
+                "start": "start",
+                "a": "a",
+                "b": "b",
+                "end": "end",
+            },
+            arcs=[
+                ("start", "in"),
+                ("in", "a"),
+                ("a", "mid"),
+                ("mid", "b"),
+                ("b", "out"),
+                ("out", "end"),
+            ],
+        )
+
+        ocpn = _build_ocpn({"item": item_net})
+        components = detect_subprocess_components(
+            ocpn,
+            {
+                "start": 2,
+                "a": 1,
+                "b": 1,
+                "end": 2,
+            },
+            reference_layer=2,
+        )
+
+        collapsed_ocpn, inserted_transitions = collapse_sub_processes(ocpn, components)
+        highlight_component = {
+            "id": "collapsed_sub_processes",
+            "color": "#12ab34",
+            "transition_keys": frozenset(
+                _transition_key(object_type, transition)
+                for object_type, transition in inserted_transitions
+            ),
+            "place_keys": frozenset(),
+            "arc_keys": frozenset(),
+        }
+
+        graphviz = _build_ocpn_graphviz(
+            collapsed_ocpn,
+            subprocess_components=[highlight_component],
+        )
+
+        self.assertIn("#12ab34", graphviz.source)
+        self.assertIn("subprocess_1", graphviz.source)
+
+        image = render_collapsed_sub_processes(
+            ocpn,
+            components,
+            highlight_color="#12ab34",
+            max_size=(400, 200),
+        )
+
+        self.assertIsNotNone(image)
+        self.assertLessEqual(image.width, 400)
+        self.assertLessEqual(image.height, 200)
+
+    def test_render_collapsed_sub_processes_marks_inserted_transition_with_plus_icon(self):
+        item_net = _build_net(
+            "item",
+            places=["in", "mid", "out"],
+            transitions={
+                "start": "start",
+                "a": "a",
+                "b": "b",
+                "end": "end",
+            },
+            arcs=[
+                ("start", "in"),
+                ("in", "a"),
+                ("a", "mid"),
+                ("mid", "b"),
+                ("b", "out"),
+                ("out", "end"),
+            ],
+        )
+
+        ocpn = _build_ocpn({"item": item_net})
+        components = detect_subprocess_components(
+            ocpn,
+            {
+                "start": 2,
+                "a": 1,
+                "b": 1,
+                "end": 2,
+            },
+            reference_layer=2,
+        )
+
+        collapsed_ocpn, inserted_transitions = collapse_sub_processes(ocpn, components)
+        graphviz = _build_ocpn_graphviz(
+            collapsed_ocpn,
+            subprocess_components=[{
+                "id": "collapsed_sub_processes",
+                "color": "#12ab34",
+                "fillcolor": "#12ab34",
+                "marker": "+",
+                "transition_keys": frozenset(
+                    _transition_key(object_type, transition)
+                    for object_type, transition in inserted_transitions
+                ),
+                "place_keys": frozenset(),
+                "arc_keys": frozenset(),
+            }],
+        )
+
+        self.assertIn('fillcolor="#12ab34"', graphviz.source)
+        self.assertIn("subprocess_1", graphviz.source)
+        self.assertIn(">+</FONT>", graphviz.source)
+
+    def test_hierarchy_row_rendering_uses_collapsed_subprocess_rendering(self):
+        model_image = Image.new("RGBA", (240, 120), "white")
+        model_data = {
+            "ocpn": {"petri_nets": {"item": (object(), object(), object())}},
+            "subprocess_components": [{"id": "subprocess_1"}],
+            "activity_resources": {},
+            "highlighted_activities": [],
+        }
+
+        with patch(
+            "repo.helpers.vorbose.render_collapsed_sub_processes",
+            return_value=model_image,
+        ) as collapsed_render_patch, patch(
+            "repo.helpers.vorbose._render_ocpn_image",
+            return_value=model_image,
+        ) as regular_render_patch:
+            image = _render_model_image_for_hierarchy_row(
+                model_data,
+                {"item": "#123abc"},
+            )
+
+        self.assertIsNotNone(image)
+        collapsed_render_patch.assert_called_once_with(
+            model_data["ocpn"],
+            model_data["subprocess_components"],
+            max_size=(1400, 700),
+        )
+        regular_render_patch.assert_not_called()
 
     def test_global_input_places_can_start_a_subprocess(self):
         item_net = _build_net(

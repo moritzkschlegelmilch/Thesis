@@ -10,7 +10,12 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from pm4py.visualization.ocel.ocpn.variants import wo_decoration
 
-from ..discovery.subprocess_detection import _arc_key, _place_key, _transition_key
+from ..discovery.subprocess_detection import (
+    _arc_key,
+    _place_key,
+    _transition_key,
+    collapse_sub_processes,
+)
 
 
 def print_tuple_dict_matrices(push, pull, decimals=4):
@@ -167,23 +172,34 @@ def _build_object_type_colors(object_types):
     return object_type_colors
 
 
-def _build_activity_label(activity, resource_types, object_type_colors):
+def _build_activity_label(activity, resource_types, object_type_colors, marker=None):
     resource_types = resource_types or []
-    if not resource_types:
-        return activity
-
-    dots = "&#8201;".join(
-        (
-            f'<FONT COLOR="{object_type_colors.get(object_type, "#000000")}" '
-            'POINT-SIZE="16">&#9679;</FONT>'
-        )
-        for object_type in resource_types
-    )
     escaped_activity = html.escape(activity)
+    if not resource_types and marker is None:
+        return escaped_activity
+
+    dots_row = ""
+    if resource_types:
+        dots = "&#8201;".join(
+            (
+                f'<FONT COLOR="{object_type_colors.get(object_type, "#000000")}" '
+                'POINT-SIZE="16">&#9679;</FONT>'
+            )
+            for object_type in resource_types
+        )
+        dots_row = f'<TR><TD ALIGN="RIGHT">{dots}</TD></TR>'
+
+    marker_row = ""
+    if marker is not None:
+        marker_row = (
+            f'<TR><TD ALIGN="CENTER"><FONT POINT-SIZE="18">{html.escape(marker)}</FONT></TD></TR>'
+        )
+
     return (
         '<<TABLE BORDER="0" CELLBORDER="0" CELLSPACING="0" CELLPADDING="0">'
-        f'<TR><TD ALIGN="RIGHT">{dots}</TD></TR>'
+        f"{dots_row}"
         f'<TR><TD ALIGN="CENTER">{escaped_activity}</TD></TR>'
+        f"{marker_row}"
         '</TABLE>>'
     )
 
@@ -195,6 +211,7 @@ def _unique_colors(colors):
 def _build_subprocess_style_index(subprocess_components):
     transition_colors = defaultdict(list)
     transition_fillcolors = defaultdict(list)
+    transition_markers = defaultdict(list)
     place_colors = defaultdict(list)
     place_fillcolors = defaultdict(list)
     arc_colors = defaultdict(list)
@@ -202,9 +219,10 @@ def _build_subprocess_style_index(subprocess_components):
     for component in subprocess_components or []:
         color = component.get("color")
         fillcolor = component.get("fillcolor")
+        marker = component.get("marker")
         if not color:
             color = fillcolor
-        if not color and not fillcolor:
+        if not color and not fillcolor and marker is None:
             continue
 
         for transition_key in component.get("transition_keys", ()):
@@ -212,6 +230,8 @@ def _build_subprocess_style_index(subprocess_components):
                 transition_colors[transition_key].append(color)
             if fillcolor:
                 transition_fillcolors[transition_key].append(fillcolor)
+            if marker is not None:
+                transition_markers[transition_key].append(marker)
         for place_key in component.get("place_keys", ()):
             if color:
                 place_colors[place_key].append(color)
@@ -229,6 +249,10 @@ def _build_subprocess_style_index(subprocess_components):
         "transition_fillcolors": {
             key: _unique_colors(colors)
             for key, colors in transition_fillcolors.items()
+        },
+        "transition_markers": {
+            key: tuple(dict.fromkeys(markers))
+            for key, markers in transition_markers.items()
         },
         "places": {
             key: _unique_colors(colors)
@@ -329,10 +353,12 @@ def _build_ocpn_graphviz(
 
     for activity in ocpn["activities"]:
         activities_map[activity] = str(wo_decoration.uuid.uuid4())
+        activity_markers = subprocess_styles["transition_markers"].get(("activity", activity), ())
         label = _build_activity_label(
             activity,
             activity_resource_types.get(activity, []),
             object_type_colors,
+            marker=activity_markers[0] if activity_markers else None,
         )
         activity_colors = subprocess_styles["transitions"].get(("activity", activity), ())
         activity_fillcolors = subprocess_styles["transition_fillcolors"].get(("activity", activity), ())
@@ -489,6 +515,54 @@ def _render_ocpn_image(
     image = Image.open(BytesIO(gviz.pipe(format="png"))).convert("RGBA")
     image = ImageOps.contain(image, max_size)
     return image
+
+
+def render_collapsed_sub_processes(
+        ocpn,
+        subprocess_components,
+        highlight_color="#f7d7a6",
+        max_size=(1400, 700),
+):
+    collapsed_ocpn, inserted_transitions = collapse_sub_processes(ocpn, subprocess_components)
+    if collapsed_ocpn is None:
+        return None
+
+    highlight_component = {
+        "id": "collapsed_sub_processes",
+        "color": highlight_color,
+        "fillcolor": highlight_color,
+        "marker": "+",
+        "transition_keys": frozenset(
+            _transition_key(object_type, transition)
+            for object_type, transition in inserted_transitions
+        ),
+        "place_keys": frozenset(),
+        "arc_keys": frozenset(),
+    }
+
+    return _render_ocpn_image(
+        collapsed_ocpn,
+        max_size=max_size,
+        subprocess_components=[highlight_component],
+    )
+
+
+def _render_model_image_for_hierarchy_row(model_data, object_type_colors, max_size=(1400, 700)):
+    if model_data.get("subprocess_components"):
+        return render_collapsed_sub_processes(
+            model_data.get("ocpn"),
+            model_data.get("subprocess_components"),
+            max_size=max_size,
+        )
+
+    return _render_ocpn_image(
+        model_data.get("ocpn"),
+        max_size=max_size,
+        object_type_colors=object_type_colors,
+        activity_resource_types=model_data.get("activity_resources"),
+        highlighted_activities=model_data.get("highlighted_activities"),
+        subprocess_components=model_data.get("subprocess_components"),
+    )
 
 
 def _placeholder_model_image(text, size=(900, 220)):
@@ -678,12 +752,10 @@ def visualize_hierarchy_with_models(
         text_height = 40 + label_height + 22 + objects_height + 50
 
         try:
-            model_image = _render_ocpn_image(
-                model_data.get("ocpn"),
-                object_type_colors=object_type_colors,
-                activity_resource_types=model_data.get("activity_resources"),
-                highlighted_activities=model_data.get("highlighted_activities"),
-                subprocess_components=model_data.get("subprocess_components"),
+            model_image = _render_model_image_for_hierarchy_row(
+                model_data,
+                object_type_colors,
+                max_size=(1400, 700),
             )
         except Exception:
             model_image = None

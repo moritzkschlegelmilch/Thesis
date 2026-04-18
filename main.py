@@ -2,6 +2,8 @@ import pm4py
 
 from discovery.algorithm import ProcessAreaDiscovery
 from repo.discovery.component_deletion_impact import render_component_deletion_impact, discover_component_and_edge_ocpns
+from repo.discovery.subprocess_detection import collapse_sub_processes
+from repo.helpers.vorbose import render_collapsed_sub_processes
 from totem_lib import import_ocel
 
 
@@ -11,6 +13,11 @@ discovery = ProcessAreaDiscovery(ocel)
 discovery.get_layers()
 discovery.discover_models()
 discovery.visualize()
+
+#render_collapsed_sub_processes(discovery.discovered_models[3]["ocpn"], discovery.discovered_models[3]["subprocess_components"]).show()
+
+
+#discovery.visualize()
 
 # component_activities = {"Drive to Terminal"}
 #

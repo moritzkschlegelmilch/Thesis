@@ -1,7 +1,8 @@
 from collections import defaultdict, deque
 import colorsys
 
-from pm4py.objects.petri_net.obj import PetriNet
+from pm4py.objects.petri_net.obj import Marking, PetriNet
+from pm4py.objects.petri_net.utils import petri_utils
 
 
 def _transition_key(object_type, transition):
@@ -35,6 +36,10 @@ def _sort_place_key(place_key):
         getattr(place_key[2], "name", ""),
         id(place_key[2]),
     )
+
+
+def _sort_petri_net_node(node):
+    return getattr(node, "name", ""), id(node)
 
 
 def _iter_bits(mask):
@@ -625,6 +630,204 @@ def _build_component_fragment(component_search_data, mask):
         "arc_keys": frozenset(selected_arc_keys),
         "object_types": frozenset(selected_object_types),
     }
+
+
+def _clone_marking(marking, place_map):
+    cloned_marking = Marking()
+    for place, count in marking.items():
+        cloned_marking[place_map[place]] = count
+    return cloned_marking
+
+
+def _filter_marking_to_net(marking, net):
+    filtered_marking = Marking()
+    for place, count in marking.items():
+        if place in net.places:
+            filtered_marking[place] = count
+    return filtered_marking
+
+
+def _clone_ocpn(ocpn):
+    if ocpn is None:
+        return None, {}
+
+    cloned_petri_nets = {}
+    node_maps = {}
+
+    for object_type, (net, initial_marking, final_marking) in ocpn["petri_nets"].items():
+        cloned_net = PetriNet(net.name)
+        place_map = {}
+        transition_map = {}
+
+        for place in sorted(net.places, key=_sort_petri_net_node):
+            cloned_place = PetriNet.Place(place.name)
+            cloned_place.properties.update(getattr(place, "properties", {}))
+            cloned_net.places.add(cloned_place)
+            place_map[place] = cloned_place
+
+        for transition in sorted(net.transitions, key=_sort_petri_net_node):
+            cloned_transition = PetriNet.Transition(transition.name, transition.label)
+            cloned_transition.properties.update(getattr(transition, "properties", {}))
+            cloned_net.transitions.add(cloned_transition)
+            transition_map[transition] = cloned_transition
+
+        for arc in sorted(
+            net.arcs,
+            key=lambda arc: (
+                _sort_petri_net_node(arc.source),
+                _sort_petri_net_node(arc.target),
+            ),
+        ):
+            cloned_arc = petri_utils.add_arc_from_to(
+                place_map.get(arc.source, transition_map.get(arc.source)),
+                place_map.get(arc.target, transition_map.get(arc.target)),
+                cloned_net,
+                weight=getattr(arc, "weight", 1),
+            )
+            cloned_arc.properties.update(getattr(arc, "properties", {}))
+
+        cloned_petri_nets[object_type] = (
+            cloned_net,
+            _clone_marking(initial_marking, place_map),
+            _clone_marking(final_marking, place_map),
+        )
+        node_maps[object_type] = {
+            "places": place_map,
+            "transitions": transition_map,
+        }
+
+    cloned_ocpn = dict(ocpn)
+    cloned_ocpn["petri_nets"] = cloned_petri_nets
+    cloned_ocpn["activities"] = sorted({
+        transition.label
+        for net, _, _ in cloned_petri_nets.values()
+        for transition in net.transitions
+        if transition.label is not None
+    })
+    cloned_ocpn["tbr_results"] = {}
+    cloned_ocpn["double_arcs_on_activity"] = {
+        object_type: {}
+        for object_type in cloned_petri_nets
+    }
+    return cloned_ocpn, node_maps
+
+
+def _component_boundary_places(component):
+    boundary_places = defaultdict(lambda: {"input": set(), "output": set()})
+    component_arc_keys = set(component.get("arc_keys", ()))
+
+    for place_key in component.get("place_keys", ()):
+        object_type = place_key[1]
+        place = place_key[2]
+        has_component_predecessor = any(
+            _arc_key(object_type, arc) in component_arc_keys
+            and isinstance(arc.source, PetriNet.Transition)
+            for arc in place.in_arcs
+        )
+        has_component_successor = any(
+            _arc_key(object_type, arc) in component_arc_keys
+            and isinstance(arc.target, PetriNet.Transition)
+            for arc in place.out_arcs
+        )
+
+        if not has_component_predecessor:
+            boundary_places[object_type]["input"].add(place)
+        if not has_component_successor:
+            boundary_places[object_type]["output"].add(place)
+
+    return boundary_places
+
+
+def collapse_sub_processes(ocpn, subprocess_components):
+    cloned_ocpn, node_maps = _clone_ocpn(ocpn)
+    if cloned_ocpn is None:
+        return None, frozenset()
+
+    inserted_transitions = set()
+
+    for component in sorted(subprocess_components or (), key=lambda component: component.get("id", "")):
+        component_arc_keys = set(component.get("arc_keys", ()))
+        component_transition_keys = set(component.get("transition_keys", ()))
+        component_boundary_places = _component_boundary_places(component)
+
+        for object_type, (net, initial_marking, final_marking) in cloned_ocpn["petri_nets"].items():
+            original_place_map = node_maps[object_type]["places"]
+            original_transition_map = node_maps[object_type]["transitions"]
+
+            transitions_to_remove = [
+                cloned_transition
+                for original_transition, cloned_transition in original_transition_map.items()
+                if _transition_key(object_type, original_transition) in component_transition_keys
+                and any(
+                    _arc_key(object_type, arc) in component_arc_keys
+                    for arc in original_transition.in_arcs | original_transition.out_arcs
+                )
+                and cloned_transition in net.transitions
+            ]
+
+            if not transitions_to_remove:
+                continue
+
+            input_places = [
+                original_place_map[place]
+                for place in sorted(
+                    component_boundary_places.get(object_type, {}).get("input", ()),
+                    key=_sort_petri_net_node,
+                )
+                if place in original_place_map and original_place_map[place] in net.places
+            ]
+            output_places = [
+                original_place_map[place]
+                for place in sorted(
+                    component_boundary_places.get(object_type, {}).get("output", ()),
+                    key=_sort_petri_net_node,
+                )
+                if place in original_place_map and original_place_map[place] in net.places
+            ]
+            kept_places = set(input_places) | set(output_places)
+
+            places_to_remove = [
+                cloned_place
+                for place_key in component.get("place_keys", ())
+                if place_key[1] == object_type
+                for cloned_place in [original_place_map.get(place_key[2])]
+                if cloned_place is not None
+                and cloned_place in net.places
+                and cloned_place not in kept_places
+            ]
+
+            for transition in transitions_to_remove:
+                petri_utils.remove_transition(net, transition)
+            for place in places_to_remove:
+                petri_utils.remove_place(net, place)
+
+            collapsed_transition = PetriNet.Transition(
+                f"{component.get('id', 'subprocess')}__{object_type}",
+                component.get("id"),
+            )
+            net.transitions.add(collapsed_transition)
+            for place in input_places:
+                petri_utils.add_arc_from_to(place, collapsed_transition, net)
+            for place in output_places:
+                petri_utils.add_arc_from_to(collapsed_transition, place, net)
+
+            inserted_transitions.add((object_type, collapsed_transition))
+            cloned_ocpn["petri_nets"][object_type] = (
+                net,
+                _filter_marking_to_net(initial_marking, net),
+                _filter_marking_to_net(final_marking, net),
+            )
+
+    cloned_ocpn["activities"] = sorted({
+        transition.label
+        for net, _, _ in cloned_ocpn["petri_nets"].values()
+        for transition in net.transitions
+        if transition.label is not None
+    })
+    for object_type in cloned_ocpn["petri_nets"]:
+        cloned_ocpn["double_arcs_on_activity"].setdefault(object_type, {})
+
+    return cloned_ocpn, frozenset(inserted_transitions)
 
 
 def detect_subprocess_components(ocpn, activity_to_layer, reference_layer):
