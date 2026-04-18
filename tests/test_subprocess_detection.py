@@ -15,7 +15,11 @@ from repo.discovery.component_deletion_impact import (
     calculate_component_deletion_impact_footprint,
     discover_component_and_edge_ocpns,
 )
-from repo.discovery.discovery_preparation import _compute_information_loss, discover_models_for_hierarchy
+from repo.discovery.discovery_preparation import (
+    _compute_information_loss,
+    _compute_simplicity_gain,
+    discover_models_for_hierarchy,
+)
 from repo.discovery.subprocess_detection import (
     _build_component_colors,
     _arc_key,
@@ -560,10 +564,12 @@ class SubprocessDetectionTests(unittest.TestCase):
         )
         with_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
         without_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
+        qualities = {}
 
         def net_quality_side_effect(ocpn, ocel):
             self.assertIs(ocel, fake_ocel)
             quality = unittest.mock.Mock()
+            qualities[id(ocpn)] = quality
             if ocpn is with_ocpn:
                 quality.precision.return_value = 0.8
                 return quality
@@ -590,6 +596,44 @@ class SubprocessDetectionTests(unittest.TestCase):
             )
 
         self.assertEqual(information_loss, 0.5)
+        self.assertEqual(
+            qualities[id(with_ocpn)].precision.call_args_list,
+            [unittest.mock.call(show_progress=True)],
+        )
+        self.assertEqual(
+            qualities[id(without_ocpn)].precision.call_args_list,
+            [unittest.mock.call(show_progress=True)],
+        )
+
+    def test_compute_simplicity_gain_uses_complexity_ratio(self):
+        with_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
+        without_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
+
+        def net_quality_side_effect(ocpn, ocel=None):
+            quality = unittest.mock.Mock()
+            if ocpn is with_ocpn:
+                quality.complexity.return_value = 12.0
+                return quality
+            if ocpn is without_ocpn:
+                quality.complexity.return_value = 3.0
+                return quality
+            raise AssertionError("Unexpected OCPN")
+
+        with patch(
+            "repo.discovery.component_deletion_impact.discover_component_and_edge_ocpns",
+            return_value=(with_ocpn, without_ocpn),
+        ), patch(
+            "repo.discovery.net_quality.NetQuality",
+            side_effect=net_quality_side_effect,
+        ):
+            simplicity_gain = _compute_simplicity_gain(
+                current_model=object(),
+                current_ocel=object(),
+                lower_layer_ocel=None,
+                component={"activities": ("a", "b")},
+            )
+
+        self.assertEqual(simplicity_gain, 0.75)
 
     def test_build_component_deletion_highlight_marks_union_across_object_types(self):
         item_net = _build_net(
@@ -1011,7 +1055,7 @@ class SubprocessDetectionTests(unittest.TestCase):
 
         self.assertIn('color="#123abc:#456def"', graphviz.source)
 
-    def test_layer_discovery_keeps_default_behavior_with_placeholder_scores(self):
+    def test_layer_discovery_prunes_component_with_default_scores(self):
         ocel = _build_hierarchy_test_ocel()
         _, discovered_models = discover_models_for_hierarchy(
             ocel,
@@ -1020,11 +1064,8 @@ class SubprocessDetectionTests(unittest.TestCase):
 
         layer_two_model = discovered_models[2]
 
-        self.assertEqual(layer_two_model["activities"], ["a", "b", "end", "start"])
-        self.assertIn(
-            frozenset({"a", "b"}),
-            _component_activity_sets(layer_two_model["subprocess_components"]),
-        )
+        self.assertEqual(layer_two_model["activities"], ["end", "start"])
+        self.assertEqual(layer_two_model["subprocess_components"], [])
 
     def test_layer_discovery_recomputes_final_components_after_pruning(self):
         ocel = _build_hierarchy_test_ocel()

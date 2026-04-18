@@ -436,22 +436,50 @@ def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, com
     precision_with_component = 0.0
     if component_and_edge_ocpn is not None and component_and_edge_ocel is not None:
         precision_with_component = float(
-            NetQuality(component_and_edge_ocpn, component_and_edge_ocel).precision()
+            NetQuality(
+                component_and_edge_ocpn,
+                component_and_edge_ocel,
+                max_nodes_per_replay=100,
+            ).precision(show_progress=True)
         )
-    if precision_with_component <= 0:
-        return 1
 
     precision_without_component = 0.0
     if edge_only_ocpn is not None:
         precision_without_component = float(
-            NetQuality(edge_only_ocpn, component_and_edge_ocel).precision()
+            NetQuality(
+                edge_only_ocpn,
+                component_and_edge_ocel,
+                max_nodes_per_replay=10
+            ).precision(show_progress=True)
         )
     information_loss = 1 - (precision_without_component / precision_with_component)
-    return max(0.0, information_loss)
+    return information_loss
 
 
 def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, component):
-    return 0
+    component_activities = tuple(component.get("activities", ()))
+    if current_model is None or not component_activities:
+        return 0
+
+    from .component_deletion_impact import discover_component_and_edge_ocpns
+    from .net_quality import NetQuality
+
+    component_and_edge_ocpn, edge_only_ocpn = discover_component_and_edge_ocpns(
+        current_ocel,
+        current_model,
+        component_activities,
+        lower_layer_ocel=lower_layer_ocel,
+    )
+    if component_and_edge_ocpn is None:
+        return 0
+
+    complexity_with_component = float(NetQuality(component_and_edge_ocpn).complexity())
+    complexity_without_component = 0.0
+    if edge_only_ocpn is not None:
+        complexity_without_component = float(NetQuality(edge_only_ocpn).complexity())
+
+    simplicity_gain = 1 - (complexity_without_component / complexity_with_component)
+    return simplicity_gain
 
 
 def _select_best_pruning_candidate(current_model, current_ocel, lower_layer_ocel, candidates):

@@ -10,28 +10,29 @@ ocel = import_ocel("example_data/ContainerLogistics.sqlite")
 discovery = ProcessAreaDiscovery(ocel)
 discovery.get_layers()
 discovery.discover_models()
+discovery.visualize()
 
-component_activities = {"Drive to Terminal"}
-
-component_plus_edges_ocpn, edge_only_ocpn = discover_component_and_edge_ocpns(
-    ocel=discovery.discovered_models[3]["ocel"],
-    ocpn=discovery.discovered_models[3]["ocpn"],
-    component_activity_labels=component_activities,
-    lower_layer_ocel=discovery.discovered_models[2]["ocel"],
-)
-
+# component_activities = {"Drive to Terminal"}
 #
-# image = render_component_deletion_impact(
-#     discovery.discovered_models[3]['ocpn'],
-#     component_activities,
-#     highlight_color="#ffd966",
+# component_plus_edges_ocpn, edge_only_ocpn = discover_component_and_edge_ocpns(
+#     ocel=discovery.discovered_models[3]["ocel"],
+#     ocpn=discovery.discovered_models[3]["ocpn"],
+#     component_activity_labels=component_activities,
+#     lower_layer_ocel=discovery.discovered_models[2]["ocel"],
 # )
 #
-# if image is not None:
-#     image.show()
-#
-pm4py.view_ocpn(component_plus_edges_ocpn, format="png", bgcolor="white")
-pm4py.view_ocpn(edge_only_ocpn, format="png", bgcolor="white")
+# #
+# # image = render_component_deletion_impact(
+# #     discovery.discovered_models[3]['ocpn'],
+# #     component_activities,
+# #     highlight_color="#ffd966",
+# # )
+# #
+# # if image is not None:
+# #     image.show()
+# #
+# pm4py.view_ocpn(component_plus_edges_ocpn, format="png", bgcolor="white")
+# pm4py.view_ocpn(edge_only_ocpn, format="png", bgcolor="white")
 
 #discovery.visualize()
 
