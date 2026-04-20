@@ -522,8 +522,11 @@ def render_collapsed_sub_processes(
         subprocess_components,
         highlight_color="#f7d7a6",
         max_size=(1400, 700),
+        object_type_colors=None,
+        activity_resource_types=None,
+        highlighted_activities=None,
 ):
-    collapsed_ocpn, inserted_transitions = collapse_sub_processes(ocpn, subprocess_components)
+    collapsed_ocpn, inserted_transitions = collapse_sub_processes(ocpn, subprocess_components) #ocpn, []#
     if collapsed_ocpn is None:
         return None
 
@@ -539,11 +542,17 @@ def render_collapsed_sub_processes(
         "place_keys": frozenset(),
         "arc_keys": frozenset(),
     }
+    rendered_subprocess_components = list(subprocess_components or [])
+    if inserted_transitions:
+        rendered_subprocess_components = [highlight_component]
 
     return _render_ocpn_image(
         collapsed_ocpn,
         max_size=max_size,
-        subprocess_components=[highlight_component],
+        object_type_colors=object_type_colors,
+        activity_resource_types=activity_resource_types,
+        highlighted_activities=highlighted_activities,
+        subprocess_components=rendered_subprocess_components,
     )
 
 
@@ -553,6 +562,9 @@ def _render_model_image_for_hierarchy_row(model_data, object_type_colors, max_si
             model_data.get("ocpn"),
             model_data.get("subprocess_components"),
             max_size=max_size,
+            object_type_colors=object_type_colors,
+            activity_resource_types=model_data.get("activity_resources"),
+            highlighted_activities=model_data.get("highlighted_activities"),
         )
 
     return _render_ocpn_image(
@@ -563,6 +575,157 @@ def _render_model_image_for_hierarchy_row(model_data, object_type_colors, max_si
         highlighted_activities=model_data.get("highlighted_activities"),
         subprocess_components=model_data.get("subprocess_components"),
     )
+
+
+def render_pruning_candidate_debug(
+        with_component_ocpn,
+        without_component_ocpn,
+        *,
+        title="Pruning Candidate Debug",
+        with_component_title="With component",
+        without_component_title="Without component",
+        with_component_metrics=None,
+        without_component_metrics=None,
+        summary_metrics=None,
+        max_model_size=(900, 420),
+        output_path=None,
+        show=False,
+):
+    with_component_metrics = with_component_metrics or {}
+    without_component_metrics = without_component_metrics or {}
+    summary_metrics = summary_metrics or {}
+
+    title_font = _load_font(28)
+    heading_font = _load_font(22)
+    body_font = _load_font(18)
+
+    with_image = _render_ocpn_image(with_component_ocpn, max_size=max_model_size)
+    without_image = _render_ocpn_image(without_component_ocpn, max_size=max_model_size)
+
+    if with_image is None:
+        with_image = _placeholder_model_image("No process model", size=(max_model_size[0], 220))
+    if without_image is None:
+        without_image = _placeholder_model_image("No process model", size=(max_model_size[0], 220))
+
+    dummy_image = Image.new("RGB", (10, 10), "white")
+    dummy_draw = ImageDraw.Draw(dummy_image)
+
+    def _metrics_lines(metrics):
+        lines = []
+        for label, value in metrics.items():
+            if isinstance(value, float):
+                lines.append(f"{label}: {value:.4f}")
+            else:
+                lines.append(f"{label}: {value}")
+        return lines or ["No metrics"]
+
+    with_lines = _metrics_lines(with_component_metrics)
+    without_lines = _metrics_lines(without_component_metrics)
+    summary_lines = _metrics_lines(summary_metrics)
+
+    def _text_block_height(lines, font, spacing):
+        if not lines:
+            return 0
+        sample_bbox = dummy_draw.textbbox((0, 0), "Ag", font=font)
+        line_height = sample_bbox[3] - sample_bbox[1]
+        return len(lines) * line_height + max(0, len(lines) - 1) * spacing
+
+    outer_padding = 24
+    panel_gap = 24
+    section_gap = 18
+    metrics_spacing = 8
+    header_gap = 10
+    panel_padding = 16
+    panel_width = max(with_image.width, without_image.width) + 2 * panel_padding
+    summary_width = 360
+
+    title_bbox = dummy_draw.textbbox((0, 0), title, font=title_font)
+    title_height = title_bbox[3] - title_bbox[1]
+    heading_bbox = dummy_draw.textbbox((0, 0), with_component_title, font=heading_font)
+    heading_height = heading_bbox[3] - heading_bbox[1]
+    body_bbox = dummy_draw.textbbox((0, 0), "Ag", font=body_font)
+    body_height = body_bbox[3] - body_bbox[1]
+
+    with_panel_height = (
+        panel_padding + heading_height + header_gap + with_image.height + section_gap
+        + _text_block_height(with_lines, body_font, metrics_spacing) + panel_padding
+    )
+    without_panel_height = (
+        panel_padding + heading_height + header_gap + without_image.height + section_gap
+        + _text_block_height(without_lines, body_font, metrics_spacing) + panel_padding
+    )
+    summary_panel_height = (
+        panel_padding + heading_height + header_gap
+        + _text_block_height(summary_lines, body_font, metrics_spacing) + panel_padding
+    )
+
+    content_height = max(with_panel_height, without_panel_height, summary_panel_height)
+    canvas_width = outer_padding * 2 + panel_width * 2 + summary_width + panel_gap * 2
+    canvas_height = outer_padding * 2 + title_height + section_gap + content_height
+
+    canvas = Image.new("RGBA", (canvas_width, canvas_height), "white")
+    draw = ImageDraw.Draw(canvas)
+    draw.text((outer_padding, outer_padding), title, fill="black", font=title_font)
+
+    panel_y = outer_padding + title_height + section_gap
+
+    def _draw_panel(x, heading, image, lines, width):
+        panel_bottom = panel_y + content_height
+        draw.rounded_rectangle(
+            [(x, panel_y), (x + width, panel_bottom)],
+            radius=18,
+            outline="black",
+            width=2,
+            fill="#f7f7f7",
+        )
+        cursor_y = panel_y + panel_padding
+        draw.text((x + panel_padding, cursor_y), heading, fill="black", font=heading_font)
+        cursor_y += heading_height + header_gap
+        image_x = x + (width - image.width) // 2
+        canvas.alpha_composite(image, (image_x, cursor_y))
+        cursor_y += image.height + section_gap
+        for line in lines:
+            draw.text((x + panel_padding, cursor_y), line, fill="black", font=body_font)
+            cursor_y += body_height + metrics_spacing
+
+    _draw_panel(outer_padding, with_component_title, with_image, with_lines, panel_width)
+    _draw_panel(
+        outer_padding + panel_width + panel_gap,
+        without_component_title,
+        without_image,
+        without_lines,
+        panel_width,
+    )
+
+    summary_x = outer_padding + 2 * (panel_width + panel_gap)
+    summary_bottom = panel_y + content_height
+    draw.rounded_rectangle(
+        [(summary_x, panel_y), (summary_x + summary_width, summary_bottom)],
+        radius=18,
+        outline="black",
+        width=2,
+        fill="#fff8eb",
+    )
+    cursor_y = panel_y + panel_padding
+    draw.text((summary_x + panel_padding, cursor_y), "Summary", fill="black", font=heading_font)
+    cursor_y += heading_height + header_gap
+    for line in summary_lines:
+        draw.text((summary_x + panel_padding, cursor_y), line, fill="black", font=body_font)
+        cursor_y += body_height + metrics_spacing
+
+    result = canvas.convert("RGB")
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        result.save(output_path)
+    if show:
+        plt.figure(figsize=(max(12, result.width / 150), max(7, result.height / 150)))
+        plt.imshow(result)
+        plt.axis("off")
+        plt.tight_layout()
+        plt.show()
+        plt.close()
+    return result
 
 
 def _placeholder_model_image(text, size=(900, 220)):

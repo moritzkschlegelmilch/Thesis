@@ -7,7 +7,7 @@ from repo.helpers.vorbose import render_collapsed_sub_processes
 from totem_lib import import_ocel
 
 
-ocel = import_ocel("example_data/ContainerLogistics.sqlite")
+ocel = import_ocel("example_data/ocel_inventory_management.xml")
 
 discovery = ProcessAreaDiscovery(ocel)
 discovery.get_layers()

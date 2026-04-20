@@ -19,6 +19,7 @@ from repo.discovery.component_deletion_impact import (
 from repo.discovery.discovery_preparation import (
     _compute_information_loss,
     _compute_simplicity_gain,
+    _select_best_pruning_candidate,
     discover_models_for_hierarchy,
 )
 from repo.discovery.subprocess_detection import (
@@ -33,6 +34,7 @@ from repo.discovery.totem import clear_totem_cache
 from repo.helpers.vorbose import (
     _build_ocpn_graphviz,
     _render_model_image_for_hierarchy_row,
+    render_pruning_candidate_debug,
     render_collapsed_sub_processes,
 )
 
@@ -109,6 +111,21 @@ def _ocpn_object_types(ocpn):
     if ocpn is None:
         return None
     return set(ocpn["petri_nets"])
+
+
+def _build_simple_debug_ocpn():
+    net = _build_net(
+        "item",
+        places=["in", "out"],
+        transitions={
+            "a": "a",
+        },
+        arcs=[
+            ("in", "a"),
+            ("a", "out"),
+        ],
+    )
+    return _build_ocpn({"item": net})
 
 
 class _FakeInputOCEL:
@@ -1145,8 +1162,146 @@ class SubprocessDetectionTests(unittest.TestCase):
             model_data["ocpn"],
             model_data["subprocess_components"],
             max_size=(1400, 700),
+            object_type_colors={"item": "#123abc"},
+            activity_resource_types={},
+            highlighted_activities=[],
         )
         regular_render_patch.assert_not_called()
+
+    def test_collapsed_rendering_preserves_highlighted_activities_inputs(self):
+        model_image = Image.new("RGBA", (240, 120), "white")
+        model_data = {
+            "ocpn": {"petri_nets": {"item": (object(), object(), object())}},
+            "subprocess_components": [{"id": "subprocess_1"}],
+            "activity_resources": {"a": ["item"]},
+            "highlighted_activities": ["a"],
+        }
+
+        with patch(
+            "repo.helpers.vorbose.render_collapsed_sub_processes",
+            return_value=model_image,
+        ) as collapsed_render_patch:
+            image = _render_model_image_for_hierarchy_row(
+                model_data,
+                {"item": "#123abc"},
+            )
+
+        self.assertIs(image, model_image)
+        collapsed_render_patch.assert_called_once_with(
+            model_data["ocpn"],
+            model_data["subprocess_components"],
+            max_size=(1400, 700),
+            object_type_colors={"item": "#123abc"},
+            activity_resource_types={"a": ["item"]},
+            highlighted_activities=["a"],
+        )
+
+    def test_render_pruning_candidate_debug_returns_side_by_side_image(self):
+        with patch("repo.helpers.vorbose.plt.figure") as figure_patch, patch(
+            "repo.helpers.vorbose.plt.imshow"
+        ) as imshow_patch, patch("repo.helpers.vorbose.plt.axis") as axis_patch, patch(
+            "repo.helpers.vorbose.plt.tight_layout"
+        ) as tight_layout_patch, patch("repo.helpers.vorbose.plt.show") as show_patch, patch(
+            "repo.helpers.vorbose.plt.close"
+        ) as close_patch:
+            image = render_pruning_candidate_debug(
+                _build_simple_debug_ocpn(),
+                _build_simple_debug_ocpn(),
+                title="Candidate debug",
+                with_component_metrics={"Complexity": 10.0, "Precision": 0.8},
+                without_component_metrics={"Complexity": 4.0, "Precision": 0.5},
+                summary_metrics={"Simplicity gain": 0.6, "Precision loss": 0.3},
+                show=True,
+            )
+
+        self.assertIsNotNone(image)
+        self.assertGreater(image.width, 0)
+        self.assertGreater(image.height, 0)
+        figure_patch.assert_called_once()
+        imshow_patch.assert_called_once()
+        axis_patch.assert_called_once_with("off")
+        tight_layout_patch.assert_called_once()
+        show_patch.assert_called_once()
+        close_patch.assert_called_once()
+
+    def test_select_best_pruning_candidate_emits_debug_output_for_each_candidate(self):
+        candidates = [
+            {"id": "a", "activities": ("a",)},
+            {"id": "b", "activities": ("b",)},
+        ]
+
+        with patch(
+            "repo.discovery.discovery_preparation._compute_simplicity_gain",
+            side_effect=[0.7, 0.4],
+        ) as simplicity_patch, patch(
+            "repo.discovery.discovery_preparation._compute_information_loss",
+            side_effect=[0.2, 0.1],
+        ) as information_patch, patch(
+            "repo.discovery.discovery_preparation._debug_pruning_candidate",
+        ) as debug_patch:
+            best_candidate, best_score = _select_best_pruning_candidate(
+                current_model=object(),
+                current_ocel=object(),
+                lower_layer_ocel=None,
+                candidates=candidates,
+            )
+
+        self.assertEqual(best_candidate, candidates[0])
+        self.assertAlmostEqual(best_score, 0.5)
+        self.assertEqual(simplicity_patch.call_count, 2)
+        self.assertEqual(information_patch.call_count, 2)
+        self.assertEqual(debug_patch.call_count, 2)
+        self.assertEqual(
+            debug_patch.call_args_list[0].args[4:],
+            (0.7, 0.2),
+        )
+        self.assertEqual(
+            debug_patch.call_args_list[1].args[4:],
+            (0.4, 0.1),
+        )
+
+    def test_debug_pruning_candidate_requests_graphic_window(self):
+        fake_ocel = _FakeInputOCEL(
+            {"item_1": "item"},
+            [
+                {"event_id": "e1", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
+            ],
+        )
+        with_ocpn = _build_simple_debug_ocpn()
+        without_ocpn = _build_simple_debug_ocpn()
+
+        def net_quality_side_effect(ocpn, ocel=None, **kwargs):
+            quality = unittest.mock.Mock()
+            if ocpn is with_ocpn:
+                quality.complexity.return_value = 10.0
+                quality.precision.return_value = 0.8
+                return quality
+            if ocpn is without_ocpn:
+                quality.complexity.return_value = 4.0
+                quality.precision.return_value = 0.5
+                return quality
+            raise AssertionError("Unexpected OCPN")
+
+        with patch(
+            "repo.discovery.component_deletion_impact.discover_component_and_edge_ocpns",
+            return_value=(with_ocpn, without_ocpn),
+        ), patch(
+            "repo.discovery.component_deletion_impact._build_component_and_edge_ocels",
+            return_value=(fake_ocel, fake_ocel),
+        ), patch(
+            "repo.helpers.vorbose.render_pruning_candidate_debug",
+        ) as render_patch, patch(
+            "repo.discovery.net_quality.NetQuality",
+            side_effect=net_quality_side_effect,
+        ):
+            _select_best_pruning_candidate(
+                current_model=object(),
+                current_ocel=fake_ocel,
+                lower_layer_ocel=None,
+                candidates=[{"id": "a", "activities": ("a",)}],
+            )
+
+        self.assertTrue(render_patch.call_args.kwargs["show"])
 
     def test_global_input_places_can_start_a_subprocess(self):
         item_net = _build_net(

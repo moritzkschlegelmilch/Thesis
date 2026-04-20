@@ -1,5 +1,7 @@
 from collections import defaultdict
 from numbers import Integral
+from pathlib import Path
+import tempfile
 
 import pandas as pd
 import pm4py
@@ -350,11 +352,14 @@ def _discover_ocpn_with_subprocess_components(layer_ocel, activity_to_layer, ref
     if ocpn is None:
         return None, []
 
+    pm4py.view_ocpn(ocpn, format="png", bgcolor="white")
+    print('start detecting subprocesses')
     subprocess_components = detect_subprocess_components(
         ocpn,
         activity_to_layer,
         reference_layer,
     )
+    print('end detecting subprocesses')
     return ocpn, subprocess_components
 
 
@@ -512,22 +517,178 @@ def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, comp
     return simplicity_gain
 
 
+def _build_collapsed_subprocess_model(component_and_edge_ocpn, component_activities):
+    if component_and_edge_ocpn is None:
+        return None
+
+    activity_to_layer = {
+        activity: 1 if activity in component_activities else 2
+        for activity in component_and_edge_ocpn.get("activities", ())
+    }
+    collapsed_components = detect_subprocess_components(
+        component_and_edge_ocpn,
+        activity_to_layer,
+        reference_layer=2,
+    )
+    matching_components = [
+        candidate_component
+        for candidate_component in collapsed_components
+        if set(_component_visible_activities(candidate_component)) == set(component_activities)
+    ]
+    if not matching_components:
+        return component_and_edge_ocpn
+
+    matching_components.sort(
+        key=lambda candidate_component: (
+            -len(candidate_component.get("transition_keys", ())),
+            -len(candidate_component.get("place_keys", ())),
+        ),
+    )
+    collapsed_ocpn, _ = collapse_sub_processes(
+        component_and_edge_ocpn,
+        [matching_components[0]],
+    )
+    return collapsed_ocpn
+
+
+def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, candidate, simplicity_gain, information_loss):
+    component_activities = tuple(candidate.get("activities", ()))
+    if current_model is None or current_ocel is None or not component_activities:
+        return
+
+    from .component_deletion_impact import (
+        _build_component_and_edge_ocels,
+        discover_component_and_edge_ocpns,
+    )
+    from .net_quality import NetQuality
+    from ..helpers.vorbose import render_pruning_candidate_debug
+
+    component_and_edge_ocpn, edge_only_ocpn = discover_component_and_edge_ocpns(
+        current_ocel,
+        current_model,
+        component_activities,
+        lower_layer_ocel=lower_layer_ocel,
+    )
+    component_and_edge_ocel, _ = _build_component_and_edge_ocels(
+        current_ocel,
+        current_model,
+        component_activities,
+        lower_layer_ocel=lower_layer_ocel,
+    )
+
+    if component_and_edge_ocpn is None and edge_only_ocpn is None:
+        return
+
+    debug_with_ocpn = component_and_edge_ocpn
+    if candidate.get("kind") == "subprocess":
+        debug_with_ocpn = _build_collapsed_subprocess_model(
+            component_and_edge_ocpn,
+            component_activities,
+        )
+
+    complexity_with_component = 0.0
+    if debug_with_ocpn is not None:
+        complexity_with_component = float(NetQuality(debug_with_ocpn).complexity())
+
+    complexity_without_component = 0.0
+    if edge_only_ocpn is not None:
+        complexity_without_component = float(NetQuality(edge_only_ocpn).complexity())
+
+    precision_with_component = 0.0
+    if component_and_edge_ocpn is not None and component_and_edge_ocel is not None:
+        precision_with_component = float(
+            NetQuality(
+                component_and_edge_ocpn,
+                component_and_edge_ocel,
+                max_nodes_per_replay=100,
+            ).precision()
+        )
+
+    precision_without_component = 0.0
+    if edge_only_ocpn is not None and component_and_edge_ocel is not None:
+        precision_without_component = float(
+            NetQuality(
+                edge_only_ocpn,
+                component_and_edge_ocel,
+                max_nodes_per_replay=10,
+            ).precision()
+        )
+
+    candidate_label = candidate.get("id") or ",".join(component_activities)
+    safe_candidate_label = "".join(
+        char if char.isalnum() or char in {"-", "_"} else "_"
+        for char in str(candidate_label)
+    ).strip("_") or "candidate"
+    output_path = Path(tempfile.gettempdir()) / f"pruning_candidate_debug_{safe_candidate_label}.png"
+
+    render_pruning_candidate_debug(
+        debug_with_ocpn,
+        edge_only_ocpn,
+        title=f"Pruning Candidate: {candidate_label}",
+        with_component_title="With component",
+        without_component_title="Without component",
+        with_component_metrics={
+            "Complexity": complexity_with_component,
+            "Precision": precision_with_component,
+        },
+        without_component_metrics={
+            "Complexity": complexity_without_component,
+            "Precision": precision_without_component,
+        },
+        summary_metrics={
+            "Simplicity gain": simplicity_gain,
+            "Precision loss": information_loss,
+            "Score": simplicity_gain - information_loss,
+        },
+        output_path=output_path,
+        show=True,
+    )
+
+    print(f"Pruning candidate debug image: {output_path}")
+    print(
+        "With component | "
+        f"complexity={complexity_with_component:.4f} "
+        f"precision={precision_with_component:.4f}"
+    )
+    print(
+        "Without component | "
+        f"complexity={complexity_without_component:.4f} "
+        f"precision={precision_without_component:.4f}"
+    )
+    print(
+        f"Simplicity gain={simplicity_gain:.4f} "
+        f"Precision loss={information_loss:.4f} "
+        f"Score={(simplicity_gain - information_loss):.4f}"
+    )
+
+
 def _select_best_pruning_candidate(current_model, current_ocel, lower_layer_ocel, candidates):
     best_candidate = None
     best_score = float("-inf")
 
     for candidate in candidates:
-        score = _compute_simplicity_gain(
-            current_model,
-            current_ocel,
-            lower_layer_ocel,
-            candidate,
-        ) - _compute_information_loss(
+        simplicity_gain = _compute_simplicity_gain(
             current_model,
             current_ocel,
             lower_layer_ocel,
             candidate,
         )
+        information_loss = _compute_information_loss(
+            current_model,
+            current_ocel,
+            lower_layer_ocel,
+            candidate,
+        )
+
+        _debug_pruning_candidate(
+            current_model,
+            current_ocel,
+            lower_layer_ocel,
+            candidate,
+            simplicity_gain,
+            information_loss,
+        )
+        score = simplicity_gain - information_loss
 
         if score > best_score:
             best_candidate = candidate
@@ -566,7 +727,10 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
             if activity_layer <= layer and layer - activity_layer <= layer_context_by_layer[layer]
         }
 
+        i = 0
         while True:
+            i += 1
+
             layer_ocel, included_event_records, included_activities = _build_layer_ocel(
                 ocel,
                 event_records,
@@ -574,11 +738,15 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
                 selected_object_types,
                 active_activities,
             )
+
+            print('start')
             ocpn, iteration_components = _discover_ocpn_with_subprocess_components(
                 layer_ocel,
                 activity_to_layer,
                 layer,
             )
+
+            print('end')
 
             candidates = _build_pruning_candidates(
                 iteration_components,
@@ -586,12 +754,14 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
                 activity_to_layer,
                 layer,
             )
+
             best_candidate, best_score = _select_best_pruning_candidate(
                 ocpn,
                 layer_ocel,
                 lower_layer_ocel,
                 candidates,
             )
+
 
             if best_candidate is None or best_score <= 0:
                 break
