@@ -1,7 +1,5 @@
 from collections import defaultdict
 from numbers import Integral
-from pathlib import Path
-import tempfile
 
 import pandas as pd
 import pm4py
@@ -370,11 +368,31 @@ def _discover_ocpn(layer_ocel):
 
 
 def _component_visible_activities(component):
+    if component is None:
+        return ()
+    if hasattr(component, "activities"):
+        return tuple(sorted(activity for activity in component.activities if activity is not None))
     return tuple(sorted({
         transition["label"]
         for transition in component.get("transitions", [])
         if transition["kind"] == "activity" and transition["label"] is not None
     }))
+
+
+def _component_transition_count(component):
+    if component is None:
+        return 0
+    if hasattr(component, "get"):
+        return len(component.get("transition_keys", ()))
+    return len(component.get("transition_keys", ()))
+
+
+def _component_place_count(component):
+    if component is None:
+        return 0
+    if hasattr(component, "get"):
+        return len(component.get("place_keys", ()))
+    return len(component.get("place_keys", ()))
 
 
 def _build_pruning_candidates(subprocess_components, included_activities, activity_to_layer, reference_layer):
@@ -392,7 +410,7 @@ def _build_pruning_candidates(subprocess_components, included_activities, activi
 
         candidates.append({
             "kind": "subprocess",
-            "id": component["id"],
+            "id": getattr(component, "id", None),
             "activities": component_activities,
             "component": component,
         })
@@ -499,8 +517,8 @@ def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, comp
         if matching_components:
             matching_components.sort(
                 key=lambda candidate_component: (
-                    -len(candidate_component.get("transition_keys", ())),
-                    -len(candidate_component.get("place_keys", ())),
+                    -_component_transition_count(candidate_component),
+                    -_component_place_count(candidate_component),
                 ),
             )
             complexity_with_component_ocpn, _ = collapse_sub_processes(
@@ -540,8 +558,8 @@ def _build_collapsed_subprocess_model(component_and_edge_ocpn, component_activit
 
     matching_components.sort(
         key=lambda candidate_component: (
-            -len(candidate_component.get("transition_keys", ())),
-            -len(candidate_component.get("place_keys", ())),
+            -_component_transition_count(candidate_component),
+            -_component_place_count(candidate_component),
         ),
     )
     collapsed_ocpn, _ = collapse_sub_processes(
@@ -619,7 +637,7 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
         char if char.isalnum() or char in {"-", "_"} else "_"
         for char in str(candidate_label)
     ).strip("_") or "candidate"
-    output_path = Path(tempfile.gettempdir()) / f"pruning_candidate_debug_{safe_candidate_label}.png"
+    #output_path = Path(tempfile.gettempdir()) / f"pruning_candidate_debug_{safe_candidate_label}.png"
 
     # render_pruning_candidate_debug(
     #     debug_with_ocpn,
@@ -644,7 +662,7 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
     #     show=True,
     # )
 
-    print(f"Pruning candidate debug image: {output_path}")
+    #print(f"Pruning candidate debug image: {output_path}")
     print(
         "With component | "
         f"complexity={complexity_with_component:.4f} "
@@ -678,15 +696,6 @@ def _select_best_pruning_candidate(current_model, current_ocel, lower_layer_ocel
             current_ocel,
             lower_layer_ocel,
             candidate,
-        )
-
-        _debug_pruning_candidate(
-            current_model,
-            current_ocel,
-            lower_layer_ocel,
-            candidate,
-            simplicity_gain,
-            information_loss,
         )
         score = simplicity_gain - information_loss
 
@@ -739,14 +748,11 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
                 active_activities,
             )
 
-            print('start')
             ocpn, iteration_components = _discover_ocpn_with_subprocess_components(
                 layer_ocel,
                 activity_to_layer,
                 layer,
             )
-
-            print('end')
 
             candidates = _build_pruning_candidates(
                 iteration_components,

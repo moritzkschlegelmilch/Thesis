@@ -310,24 +310,30 @@ def _build_ocpn_graphviz(
     highlighted_activities = set(highlighted_activities or [])
     subprocess_styles = _build_subprocess_style_index(subprocess_components)
     parameters_enum = wo_decoration.Parameters
-    image_format = wo_decoration.exec_utils.get_param_value(parameters_enum.FORMAT, parameters, "png")
+    format_param = getattr(parameters_enum, "FORMAT", "format")
+    bgcolor_param = getattr(parameters_enum, "BGCOLOR", "bgcolor")
+    rankdir_param = getattr(parameters_enum, "RANKDIR", "rankdir")
+    enable_title_param = getattr(parameters_enum, "ENABLE_GRAPH_TITLE", "enable_graph_title")
+    graph_title_param = getattr(parameters_enum, "GRAPH_TITLE", "graph_title")
+
+    image_format = wo_decoration.exec_utils.get_param_value(format_param, parameters, "png")
     bgcolor = wo_decoration.exec_utils.get_param_value(
-        parameters_enum.BGCOLOR,
+        bgcolor_param,
         parameters,
         wo_decoration.constants.DEFAULT_BGCOLOR,
     )
     rankdir = wo_decoration.exec_utils.get_param_value(
-        parameters_enum.RANKDIR,
+        rankdir_param,
         parameters,
-        wo_decoration.constants.DEFAULT_RANKDIR_GVIZ,
+        getattr(wo_decoration.constants, "DEFAULT_RANKDIR_GVIZ", "LR"),
     )
     enable_graph_title = wo_decoration.exec_utils.get_param_value(
-        parameters_enum.ENABLE_GRAPH_TITLE,
+        enable_title_param,
         parameters,
-        wo_decoration.constants.DEFAULT_ENABLE_GRAPH_TITLES,
+        getattr(wo_decoration.constants, "DEFAULT_ENABLE_GRAPH_TITLES", False),
     )
     graph_title = wo_decoration.exec_utils.get_param_value(
-        parameters_enum.GRAPH_TITLE,
+        graph_title_param,
         parameters,
         "Object-Centric Petri net",
     )

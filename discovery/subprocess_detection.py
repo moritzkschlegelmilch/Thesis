@@ -739,29 +739,65 @@ def _component_boundary_places(component):
 
 
 def collapse_sub_processes(ocpn, subprocess_components):
+    from .region_detection import ObjectCentricRegion
+
     cloned_ocpn, node_maps = _clone_ocpn(ocpn)
     if cloned_ocpn is None:
         return None, frozenset()
 
     inserted_transitions = set()
+    protected_boundary_places = defaultdict(set)
+    for component in subprocess_components or ():
+        if not isinstance(component, ObjectCentricRegion):
+            continue
+        for local_region in component.local_regions:
+            protected_boundary_places[local_region.object_type].add(local_region.source)
+            protected_boundary_places[local_region.object_type].add(local_region.target)
 
-    for component in sorted(subprocess_components or (), key=lambda component: component.get("id", "")):
-        component_arc_keys = set(component.get("arc_keys", ()))
-        component_transition_keys = set(component.get("transition_keys", ()))
-        component_boundary_places = _component_boundary_places(component)
+    sorted_components = sorted(
+        subprocess_components or (),
+        key=lambda component: getattr(component, "id", None) or "",
+    )
+    for component in sorted_components:
+        if not isinstance(component, ObjectCentricRegion):
+            continue
 
         for object_type, (net, initial_marking, final_marking) in cloned_ocpn["petri_nets"].items():
             original_place_map = node_maps[object_type]["places"]
             original_transition_map = node_maps[object_type]["transitions"]
+            local_regions = [
+                local_region
+                for local_region in component.local_regions
+                if local_region.object_type == object_type
+            ]
+            if not local_regions:
+                continue
+
+            internal_transitions = {
+                vertex
+                for local_region in local_regions
+                for vertex in local_region.internal
+                if isinstance(vertex, PetriNet.Transition)
+            }
+            internal_places = {
+                vertex
+                for local_region in local_regions
+                for vertex in local_region.internal
+                if isinstance(vertex, PetriNet.Place)
+            }
+            input_places_original = {
+                local_region.source
+                for local_region in local_regions
+            }
+            output_places_original = {
+                local_region.target
+                for local_region in local_regions
+            }
 
             transitions_to_remove = [
                 cloned_transition
                 for original_transition, cloned_transition in original_transition_map.items()
-                if _transition_key(object_type, original_transition) in component_transition_keys
-                and any(
-                    _arc_key(object_type, arc) in component_arc_keys
-                    for arc in original_transition.in_arcs | original_transition.out_arcs
-                )
+                if original_transition in internal_transitions
                 and cloned_transition in net.transitions
             ]
 
@@ -770,30 +806,28 @@ def collapse_sub_processes(ocpn, subprocess_components):
 
             input_places = [
                 original_place_map[place]
-                for place in sorted(
-                    component_boundary_places.get(object_type, {}).get("input", ()),
-                    key=_sort_petri_net_node,
-                )
-                if place in original_place_map and original_place_map[place] in net.places
+                for place in sorted(input_places_original, key=_sort_petri_net_node)
+                if place in original_place_map
+                and original_place_map[place] in net.places
             ]
             output_places = [
                 original_place_map[place]
-                for place in sorted(
-                    component_boundary_places.get(object_type, {}).get("output", ()),
-                    key=_sort_petri_net_node,
-                )
-                if place in original_place_map and original_place_map[place] in net.places
+                for place in sorted(output_places_original, key=_sort_petri_net_node)
+                if place in original_place_map
+                and original_place_map[place] in net.places
             ]
-            kept_places = set(input_places) | set(output_places)
+            kept_places = set(input_places) | set(output_places) | {
+                original_place_map[place]
+                for place in protected_boundary_places.get(object_type, ())
+                if place in original_place_map and original_place_map[place] in net.places
+            }
 
             places_to_remove = [
-                cloned_place
-                for place_key in component.get("place_keys", ())
-                if place_key[1] == object_type
-                for cloned_place in [original_place_map.get(place_key[2])]
-                if cloned_place is not None
-                and cloned_place in net.places
-                and cloned_place not in kept_places
+                original_place_map[place]
+                for place in sorted(internal_places, key=_sort_petri_net_node)
+                if place in original_place_map
+                and original_place_map[place] in net.places
+                and original_place_map[place] not in kept_places
             ]
 
             for transition in transitions_to_remove:
@@ -802,8 +836,8 @@ def collapse_sub_processes(ocpn, subprocess_components):
                 petri_utils.remove_place(net, place)
 
             collapsed_transition = PetriNet.Transition(
-                f"{component.get('id', 'subprocess')}__{object_type}",
-                component.get("id"),
+                f"{(component.id or 'subprocess')}__{object_type}",
+                component.id,
             )
             net.transitions.add(collapsed_transition)
             for place in input_places:
@@ -831,73 +865,25 @@ def collapse_sub_processes(ocpn, subprocess_components):
 
 
 def detect_subprocess_components(ocpn, activity_to_layer, reference_layer):
+    from .region_detection import detect_object_centric_regions
+
     if ocpn is None:
         return []
 
-    merged_ocpn = _build_merged_ocpn(ocpn, activity_to_layer, reference_layer)
-    candidate_components = _candidate_transition_components(merged_ocpn)
+    allowed_activities = {
+        activity
+        for activity in ocpn.get("activities", ())
+        if activity_to_layer.get(activity, float("inf")) < reference_layer
+    }
+    if not allowed_activities:
+        return []
 
-    connected_components = []
-    for component in candidate_components:
-        component_search_data = _prepare_component_search_data(merged_ocpn, component)
-        maximal_masks = _enumerate_maximal_component_masks(component_search_data)
-        component_fragments = [
-            _build_component_fragment(component_search_data, mask)
-            for mask in maximal_masks
-        ]
-        connected_components.extend(
-            fragment
-            for fragment in component_fragments
-            if len(fragment["transition_keys"]) >= 2
-        )
-
-    component_colors = _build_component_colors(len(connected_components))
-
-    serialized_components = []
-    for index, (component, component_color) in enumerate(
-        zip(
-            sorted(
-                connected_components,
-                key=lambda component: (
-                    -len(component["transition_keys"]),
-                    -len(component["place_keys"]),
-                    tuple(sorted(component["object_types"])),
-                ),
-            ),
-            component_colors,
-        ),
-        start=1,
-    ):
-        transition_keys = component["transition_keys"]
-        place_keys = component["place_keys"]
-        arc_keys = component["arc_keys"]
-
-        serialized_components.append({
-            "id": f"subprocess_{index}",
-            "color": component_color,
-            "object_types": sorted(component["object_types"]),
-            "transition_keys": transition_keys,
-            "place_keys": place_keys,
-            "arc_keys": arc_keys,
-            "transitions": [
-                _describe_transition_key(transition_key)
-                for transition_key in sorted(transition_keys, key=_sort_transition_key)
-            ],
-            "places": [
-                _describe_place_key(place_key)
-                for place_key in sorted(place_keys, key=_sort_place_key)
-            ],
-            "arcs": [
-                _describe_arc_info(merged_ocpn["arcs"][arc_key])
-                for arc_key in sorted(
-                    arc_keys,
-                    key=lambda arc_key: (
-                        merged_ocpn["arcs"][arc_key]["object_type"],
-                        _sort_place_key(merged_ocpn["arcs"][arc_key]["place_key"]),
-                        _sort_transition_key(merged_ocpn["arcs"][arc_key]["transition_key"]),
-                    ),
-                )
-            ],
-        })
-
-    return serialized_components
+    regions = detect_object_centric_regions(
+        ocpn,
+        allowed_activities=allowed_activities,
+    )
+    return [
+        region
+        for region in regions
+        if region.activities & allowed_activities
+    ]

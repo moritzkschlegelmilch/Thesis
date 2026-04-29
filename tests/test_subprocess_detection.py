@@ -22,6 +22,7 @@ from repo.discovery.discovery_preparation import (
     _select_best_pruning_candidate,
     discover_models_for_hierarchy,
 )
+from repo.discovery.region_detection import _make_local_region, _make_output_region
 from repo.discovery.subprocess_detection import (
     _build_component_colors,
     _arc_key,
@@ -1018,6 +1019,61 @@ class SubprocessDetectionTests(unittest.TestCase):
         self.assertEqual(
             {arc.target.name for arc in inserted_by_type["order"].out_arcs},
             {"order_out"},
+        )
+
+    def test_collapse_sub_processes_keeps_shared_input_place_for_multiple_regions(self):
+        item_net = _build_net(
+            "item",
+            places=["p0", "p1", "p2"],
+            transitions={
+                "a": "a",
+                "b": "b",
+            },
+            arcs=[
+                ("p0", "a"),
+                ("a", "p1"),
+                ("p0", "b"),
+                ("b", "p2"),
+            ],
+        )
+        ocpn = _build_ocpn({"item": item_net})
+
+        place_by_name = {place.name: place for place in item_net.places}
+        transition_by_name = {transition.name: transition for transition in item_net.transitions}
+        region_a = _make_output_region({
+            _make_local_region(
+                "item",
+                place_by_name["p0"],
+                {transition_by_name["a"]},
+                place_by_name["p1"],
+            )
+        })
+        region_b = _make_output_region({
+            _make_local_region(
+                "item",
+                place_by_name["p0"],
+                {transition_by_name["b"]},
+                place_by_name["p2"],
+            )
+        })
+        region_a["id"] = "subprocess_1"
+        region_b["id"] = "subprocess_2"
+
+        collapsed_ocpn, inserted_transitions = collapse_sub_processes(
+            ocpn,
+            [region_a, region_b],
+        )
+
+        collapsed_item_net, _, _ = collapsed_ocpn["petri_nets"]["item"]
+        collapsed_places = {place.name: place for place in collapsed_item_net.places}
+        self.assertIn("p0", collapsed_places)
+        self.assertEqual(
+            {arc.target.label for arc in collapsed_places["p0"].out_arcs},
+            {"subprocess_1", "subprocess_2"},
+        )
+        self.assertEqual(
+            {transition.label for _, transition in inserted_transitions},
+            {"subprocess_1", "subprocess_2"},
         )
 
     def test_render_collapsed_sub_processes_highlights_inserted_transition(self):

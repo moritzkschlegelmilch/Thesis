@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from pm4py.objects.petri_net.obj import PetriNet
-from .subprocess_detection import _arc_key, _place_key, _transition_key
+from .subprocess_detection import (
+    _arc_key,
+    _describe_place_key,
+    _describe_transition_key,
+    _place_key,
+    _sort_place_key,
+    _sort_transition_key,
+    _transition_key,
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +33,88 @@ class ObjectCentricRegion:
     target: frozenset[tuple[str, PetriNet.Place]]
     local_regions: frozenset[LocalRegion]
     activities: frozenset[str]
+    id: str | None = None
+    color: str | None = field(default=None, compare=False, hash=False)
+    fillcolor: str | None = field(default=None, compare=False, hash=False)
+    marker: str | None = field(default=None, compare=False, hash=False)
+
+    def get(self, key, default=None):
+        try:
+            return self[key]
+        except KeyError:
+            return default
+
+    def __getitem__(self, key):
+        mapping = {
+            "id": self.id,
+            "color": self.color,
+            "fillcolor": self.fillcolor,
+            "marker": self.marker,
+            "object_types": self.object_types,
+            "transition_keys": self.transition_keys,
+            "place_keys": self.place_keys,
+            "arc_keys": self.arc_keys,
+            "transitions": self.transitions,
+            "places": self.places,
+            "arcs": self.arcs,
+            "activities": tuple(sorted(self.activities)),
+        }
+        if key not in mapping:
+            raise KeyError(key)
+        return mapping[key]
+
+    def __setitem__(self, key, value):
+        if key in {"id", "color", "fillcolor", "marker"}:
+            object.__setattr__(self, key, value)
+            return
+        raise KeyError(key)
+
+    @property
+    def object_types(self):
+        return sorted({
+            local_region.object_type
+            for local_region in self.local_regions
+        })
+
+    @property
+    def transition_keys(self):
+        return frozenset(_region_transition_keys(self))
+
+    @property
+    def place_keys(self):
+        return frozenset(_region_place_keys(self))
+
+    @property
+    def arc_keys(self):
+        return frozenset(_region_arc_keys(self))
+
+    @property
+    def transitions(self):
+        return [
+            _describe_transition_key(transition_key)
+            for transition_key in sorted(self.transition_keys, key=_sort_transition_key)
+        ]
+
+    @property
+    def places(self):
+        return [
+            _describe_place_key(place_key)
+            for place_key in sorted(self.place_keys, key=_sort_place_key)
+        ]
+
+    @property
+    def arcs(self):
+        return [
+            _describe_region_arc(arc_key)
+            for arc_key in sorted(
+                self.arc_keys,
+                key=lambda arc_key: (
+                    arc_key[1],
+                    _sort_petri_net_node(arc_key[2].source),
+                    _sort_petri_net_node(arc_key[2].target),
+                ),
+            )
+        ]
 
 
 @dataclass(frozen=True)
@@ -76,7 +166,11 @@ def detect_object_centric_regions(ocpn, allowed_activities=None):
     )
     output_regions = _remove_duplicate_and_contained_outputs(output_regions)
     output_regions = _remove_trivial_regions(output_regions)
-    return sorted(output_regions, key=_sort_output_region_key)
+    output_regions = sorted(output_regions, key=_sort_output_region_key)
+    return [
+        replace(region, id=f"subprocess_{index}")
+        for index, region in enumerate(output_regions, start=1)
+    ]
 
 
 def serialize_object_centric_region(region: ObjectCentricRegion):
@@ -128,23 +222,9 @@ def build_object_centric_region_highlight(region, border_color="#f7d7a6", fillco
     place_keys = set()
     arc_keys = set()
 
-    for local_region in region.local_regions:
-        object_type = local_region.object_type
-        region_vertices = local_region.vertices
-
-        for vertex in region_vertices:
-            if isinstance(vertex, PetriNet.Place):
-                place_keys.add(_place_key(object_type, vertex))
-            else:
-                transition_keys.add(_transition_key(object_type, vertex))
-                for arc in vertex.in_arcs | vertex.out_arcs:
-                    if arc.source in region_vertices and arc.target in region_vertices:
-                        arc_keys.add(_arc_key(object_type, arc))
-
-        for place in (local_region.source, local_region.target):
-            for arc in place.in_arcs | place.out_arcs:
-                if arc.source in region_vertices and arc.target in region_vertices:
-                    arc_keys.add(_arc_key(object_type, arc))
+    transition_keys.update(_region_transition_keys(region))
+    place_keys.update(_region_place_keys(region))
+    arc_keys.update(_region_arc_keys(region))
 
     return {
         "id": "object_centric_region",
@@ -154,6 +234,54 @@ def build_object_centric_region_highlight(region, border_color="#f7d7a6", fillco
         "transition_keys": frozenset(transition_keys),
         "place_keys": frozenset(place_keys),
         "arc_keys": frozenset(arc_keys),
+    }
+
+
+def _region_transition_keys(region):
+    return {
+        _transition_key(local_region.object_type, vertex)
+        for local_region in region.local_regions
+        for vertex in local_region.internal
+        if isinstance(vertex, PetriNet.Transition)
+    }
+
+
+def _region_place_keys(region):
+    place_keys = set(region.source) | set(region.target)
+    place_keys.update(
+        (local_region.object_type, vertex)
+        for local_region in region.local_regions
+        for vertex in local_region.internal
+        if isinstance(vertex, PetriNet.Place)
+    )
+    return {
+        _place_key(object_type, place)
+        for object_type, place in place_keys
+    }
+
+
+def _region_arc_keys(region):
+    arc_keys = set()
+    for local_region in region.local_regions:
+        object_type = local_region.object_type
+        region_vertices = local_region.vertices
+        for vertex in region_vertices:
+            for arc in vertex.in_arcs | vertex.out_arcs:
+                if arc.source in region_vertices and arc.target in region_vertices:
+                    arc_keys.add(_arc_key(object_type, arc))
+    return arc_keys
+
+
+def _describe_region_arc(arc_key):
+    _, object_type, arc = arc_key
+    return {
+        "object_type": object_type,
+        "source": _describe_place_key(_place_key(object_type, arc.source))
+        if isinstance(arc.source, PetriNet.Place)
+        else _describe_transition_key(_transition_key(object_type, arc.source)),
+        "target": _describe_place_key(_place_key(object_type, arc.target))
+        if isinstance(arc.target, PetriNet.Place)
+        else _describe_transition_key(_transition_key(object_type, arc.target)),
     }
 
 
