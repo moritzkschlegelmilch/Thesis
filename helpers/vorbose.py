@@ -12,10 +12,12 @@ from pm4py.visualization.ocel.ocpn.variants import wo_decoration
 
 from ..discovery.subprocess_detection import (
     _arc_key,
+    _build_component_colors,
     _place_key,
     _transition_key,
     collapse_sub_processes,
 )
+from ..discovery.region_detection import build_object_centric_region_highlight
 
 
 def print_tuple_dict_matrices(push, pull, decimals=4):
@@ -275,7 +277,7 @@ def _node_border_attributes(colors):
         return {}
 
     border_attributes = {
-        "color": unique_colors[0],
+        "color": ":".join(unique_colors),
         "penwidth": "2.5",
     }
     if len(unique_colors) > 1:
@@ -553,6 +555,67 @@ def render_collapsed_sub_processes(
         activity_resource_types=activity_resource_types,
         highlighted_activities=highlighted_activities,
         subprocess_components=rendered_subprocess_components,
+    )
+
+
+def render_object_centric_region(
+        ocpn,
+        region,
+        highlight_color="#f7d7a6",
+        fillcolor="#f7d7a6",
+        marker=None,
+        max_size=(1400, 700),
+        object_type_colors=None,
+        activity_resource_types=None,
+        highlighted_activities=None,
+):
+    if ocpn is None or region is None:
+        return None
+
+    highlight_component = build_object_centric_region_highlight(
+        region,
+        border_color=highlight_color,
+        fillcolor=fillcolor,
+        marker=marker,
+    )
+    return _render_ocpn_image(
+        ocpn,
+        max_size=max_size,
+        object_type_colors=object_type_colors,
+        activity_resource_types=activity_resource_types,
+        highlighted_activities=highlighted_activities,
+        subprocess_components=[highlight_component],
+    )
+
+
+def render_object_centric_regions(
+        ocpn,
+        regions,
+        max_size=(1400, 700),
+        object_type_colors=None,
+        activity_resource_types=None,
+        highlighted_activities=None,
+):
+    if ocpn is None:
+        return None
+
+    regions = list(regions or [])
+    region_colors = _build_component_colors(len(regions))
+    highlight_components = [
+        build_object_centric_region_highlight(
+            region,
+            border_color=color,
+            fillcolor=None,
+        )
+        for region, color in zip(regions, region_colors)
+    ]
+    return _render_ocpn_image(
+        ocpn,
+        max_size=max_size,
+        object_type_colors=object_type_colors,
+        activity_resource_types=activity_resource_types,
+        highlighted_activities=highlighted_activities,
+        subprocess_components=highlight_components,
     )
 
 

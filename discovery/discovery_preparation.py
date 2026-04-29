@@ -352,7 +352,7 @@ def _discover_ocpn_with_subprocess_components(layer_ocel, activity_to_layer, ref
     if ocpn is None:
         return None, []
 
-    pm4py.view_ocpn(ocpn, format="png", bgcolor="white")
+    #pm4py.view_ocpn(ocpn, format="png", bgcolor="white")
     print('start detecting subprocesses')
     subprocess_components = detect_subprocess_components(
         ocpn,
@@ -621,28 +621,28 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
     ).strip("_") or "candidate"
     output_path = Path(tempfile.gettempdir()) / f"pruning_candidate_debug_{safe_candidate_label}.png"
 
-    render_pruning_candidate_debug(
-        debug_with_ocpn,
-        edge_only_ocpn,
-        title=f"Pruning Candidate: {candidate_label}",
-        with_component_title="With component",
-        without_component_title="Without component",
-        with_component_metrics={
-            "Complexity": complexity_with_component,
-            "Precision": precision_with_component,
-        },
-        without_component_metrics={
-            "Complexity": complexity_without_component,
-            "Precision": precision_without_component,
-        },
-        summary_metrics={
-            "Simplicity gain": simplicity_gain,
-            "Precision loss": information_loss,
-            "Score": simplicity_gain - information_loss,
-        },
-        output_path=output_path,
-        show=True,
-    )
+    # render_pruning_candidate_debug(
+    #     debug_with_ocpn,
+    #     edge_only_ocpn,
+    #     title=f"Pruning Candidate: {candidate_label}",
+    #     with_component_title="With component",
+    #     without_component_title="Without component",
+    #     with_component_metrics={
+    #         "Complexity": complexity_with_component,
+    #         "Precision": precision_with_component,
+    #     },
+    #     without_component_metrics={
+    #         "Complexity": complexity_without_component,
+    #         "Precision": precision_without_component,
+    #     },
+    #     summary_metrics={
+    #         "Simplicity gain": simplicity_gain,
+    #         "Precision loss": information_loss,
+    #         "Score": simplicity_gain - information_loss,
+    #     },
+    #     output_path=output_path,
+    #     show=True,
+    # )
 
     print(f"Pruning candidate debug image: {output_path}")
     print(
