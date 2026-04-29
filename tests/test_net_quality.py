@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest import mock
 from contextlib import redirect_stdout
 from io import StringIO
 
@@ -11,7 +12,7 @@ from pm4py.objects.ocel.obj import OCEL
 from pm4py.objects.petri_net.obj import Marking, PetriNet
 from pm4py.objects.petri_net.utils import petri_utils
 
-from repo.discovery.net_quality import NetQuality
+from repo.discovery.net_quality import NetQuality, _ReplayEvent
 
 
 def _build_net(name, places, transitions, arcs):
@@ -190,6 +191,42 @@ def _build_restrictive_ocpn(object_type="order"):
 
 
 class NetQualityTests(unittest.TestCase):
+    def test_replay_honors_max_nodes_per_replay(self):
+        quality = NetQuality(_build_flower_ocpn(["a"]), max_nodes_per_replay=2)
+        replay_event = _ReplayEvent(
+            context_key=(),
+            binding_sequence=(),
+            context_tokens_by_type=(),
+        )
+        successors_by_state = {
+            "start": ["first", "second"],
+            "first": ["third"],
+            "second": ["fourth"],
+            "third": [],
+            "fourth": [],
+        }
+
+        with mock.patch.object(
+            quality,
+            "_initial_state",
+            return_value="start",
+        ), mock.patch.object(
+            quality,
+            "_state_key",
+            side_effect=lambda state: state,
+        ), mock.patch.object(
+            quality,
+            "_enabled_labels",
+            side_effect=lambda state: {state},
+        ), mock.patch.object(
+            quality,
+            "_fire_silent",
+            side_effect=lambda state: successors_by_state[state],
+        ):
+            enabled = quality._replay(replay_event)
+
+        self.assertEqual(enabled, {"start", "first"})
+
     def test_discovered_deterministic_pm4py_ocpn_has_perfect_quality(self):
         ocel = _build_single_type_ocel([
             ["create", "approve", "complete"],

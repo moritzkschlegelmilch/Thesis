@@ -3,7 +3,6 @@ from __future__ import annotations
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from itertools import product
-import sys
 from typing import Any
 
 from pm4py.objects.ocel.obj import OCEL
@@ -30,7 +29,7 @@ class _BindingStep:
     objects_by_type: tuple[tuple[str, tuple[Token, ...]], ...]
 
     def non_empty_object_types(self) -> set[str]:
-        return {ot for ot, t in self.objects_by_type if t}
+        return {ot for ot, tokens in self.objects_by_type if tokens}
 
 
 @dataclass(frozen=True)
@@ -59,6 +58,7 @@ class _ModelCache:
     place_ids: dict[PlaceKey, int]
     initial_places_by_type: dict[str, tuple[PlaceKey, ...]]
     silent_transitions: tuple[_LocalTransition, ...]
+    visible_transitions_by_label_type: dict[str, dict[str, tuple[_LocalTransition, ...]]]
     visible_combinations_by_label: dict[str, tuple]
     enabled_labels_cache: dict[tuple, frozenset[str]]
     complexity_stats: _ComplexityStats
@@ -74,10 +74,15 @@ class NetQuality:
     ) -> None:
         self.ocpn = ocpn
         self.ocel = ocel
-        self.max_nodes_per_replay = max_nodes_per_replay
+        self.max_nodes_per_replay = 5000
+
+        # Private tuning parameter; public API stays unchanged.
+        # Larger values are more faithful but slower.
+        self._history_window = 5
 
         self._model_cache: _ModelCache | None = None
         self._complexity_cache: dict[tuple[float, float], float] = {}
+        self._replay_cache: dict[tuple, frozenset[str]] = {}
 
     # -------------------------
     # PUBLIC API
@@ -134,37 +139,73 @@ class NetQuality:
                 place_ids[pk] = len(place_ids)
                 merged_places[pk]
 
-            initial_places_by_type[ot] = tuple((ot, p) for p, c in im.items() if c > 0)
+            initial_places_by_type[ot] = tuple(
+                (ot, p)
+                for p, c in im.items()
+                if c > 0
+            )
 
             for t in net.transitions:
-                inp = tuple((ot, a.source) for a in t.in_arcs if isinstance(a.source, PetriNet.Place))
-                out = tuple((ot, a.target) for a in t.out_arcs if isinstance(a.target, PetriNet.Place))
+                inp = tuple(
+                    (ot, arc.source)
+                    for arc in t.in_arcs
+                    if isinstance(arc.source, PetriNet.Place)
+                )
+                out = tuple(
+                    (ot, arc.target)
+                    for arc in t.out_arcs
+                    if isinstance(arc.target, PetriNet.Place)
+                )
 
-                lt = _LocalTransition(ot, t.label, inp, out, False)
+                label = str(t.label) if t.label else None
+                lt = _LocalTransition(
+                    object_type=ot,
+                    label=label,
+                    input_places=inp,
+                    output_places=out,
+                    variable=False,
+                )
 
-                if t.label:
-                    visible[t.label][ot].append(lt)
+                if label:
+                    visible[label][ot].append(lt)
                 else:
                     silent.append(lt)
 
-            # complexity tracking
+            # Complexity tracking
             for arc in net.arcs:
                 if isinstance(arc.source, PetriNet.Place):
                     pk = (ot, arc.source)
+
                     if arc.target.label:
-                        merged_places[pk]["outgoing_visible"].add(arc.target.label)
-                        merged_visible[arc.target.label]["pred"].add(pk)
+                        label = str(arc.target.label)
+                        merged_places[pk]["outgoing_visible"].add(label)
+                        merged_visible[label]["pred"].add(pk)
+                        merged_visible[label]["types"].add(ot)
                     else:
                         merged_places[pk]["outgoing_silent"].add(arc.target.name)
                         merged_silent[arc.target.name]["pred"].add(pk)
+                        merged_silent[arc.target.name]["types"].add(ot)
+
                 else:
                     pk = (ot, arc.target)
+
                     if arc.source.label:
-                        merged_places[pk]["incoming_visible"].add(arc.source.label)
-                        merged_visible[arc.source.label]["succ"].add(pk)
+                        label = str(arc.source.label)
+                        merged_places[pk]["incoming_visible"].add(label)
+                        merged_visible[label]["succ"].add(pk)
+                        merged_visible[label]["types"].add(ot)
                     else:
                         merged_places[pk]["incoming_silent"].add(arc.source.name)
                         merged_silent[arc.source.name]["succ"].add(pk)
+                        merged_silent[arc.source.name]["types"].add(ot)
+
+        visible_by_label_type = {
+            label: {
+                ot: tuple(transitions)
+                for ot, transitions in by_type.items()
+            }
+            for label, by_type in visible.items()
+        }
 
         combos = {}
         for label, by_type in visible.items():
@@ -173,37 +214,52 @@ class NetQuality:
                 for c in product(*by_type.values())
             )
 
-        # complexity stats
         stats = _ComplexityStats(
-            place_visible_degree_sum=sum(len(v["incoming_visible"]) + len(v["outgoing_visible"]) for v in merged_places.values()),
-            place_silent_degree_sum=sum(len(v["incoming_silent"]) + len(v["outgoing_silent"]) for v in merged_places.values()),
-            visible_transition_sum=sum(len(v["pred"]) + len(v["succ"]) for v in merged_visible.values()),
-            silent_transition_sum=sum(len(v["pred"]) + len(v["succ"]) for v in merged_silent.values()),
+            place_visible_degree_sum=sum(
+                len(v["incoming_visible"]) + len(v["outgoing_visible"])
+                for v in merged_places.values()
+            ),
+            place_silent_degree_sum=sum(
+                len(v["incoming_silent"]) + len(v["outgoing_silent"])
+                for v in merged_places.values()
+            ),
+            visible_transition_sum=sum(
+                len(v["pred"]) + len(v["succ"])
+                for v in merged_visible.values()
+            ),
+            silent_transition_sum=sum(
+                len(v["pred"]) + len(v["succ"])
+                for v in merged_silent.values()
+            ),
         )
 
         self._model_cache = _ModelCache(
-            place_ids,
-            initial_places_by_type,
-            tuple(silent),
-            combos,
-            {},
-            stats
+            place_ids=place_ids,
+            initial_places_by_type=initial_places_by_type,
+            silent_transitions=tuple(silent),
+            visible_transitions_by_label_type=visible_by_label_type,
+            visible_combinations_by_label=combos,
+            enabled_labels_cache={},
+            complexity_stats=stats,
         )
 
         return self._model_cache
 
     # -------------------------
-    # EVALUATION (OCPA semantics)
+    # EVALUATION
     # -------------------------
     def _evaluate(self, ocel):
         ocel = ocel or self.ocel
         prepared = self._prepare_log(ocel)
 
         model_enabled = {}
+
         for ctx, events in prepared["replay"].items():
             enabled = set()
-            for e in events:
-                enabled |= self._replay(e)
+
+            for ev in events:
+                enabled |= self._replay(ev)
+
             model_enabled[ctx] = enabled
 
         precision_terms = []
@@ -224,20 +280,29 @@ class NetQuality:
             fitness_terms.append(len(overlap) / len(log))
 
         return _EvaluationResult(
-            precision=sum(precision_terms) / len(precision_terms) if precision_terms else 0,
-            fitness=sum(fitness_terms) / len(fitness_terms),
+            precision=sum(precision_terms) / len(precision_terms)
+            if precision_terms
+            else 0,
+            fitness=sum(fitness_terms) / len(fitness_terms)
+            if fitness_terms
+            else 0,
         )
 
     # -------------------------
-    # FAST REPLAY (COUNT BASED)
+    # BOUNDED COUNT-BASED REPLAY
     # -------------------------
     def _replay(self, ev):
-        mc = self._ensure_model_cache()
+        replay_key = self._replay_signature(ev)
+
+        if replay_key in self._replay_cache:
+            return self._replay_cache[replay_key]
+
         state = self._initial_state(ev)
 
         q = deque([(state, 0)])
         visited = set()
         enabled = set()
+        explored_nodes = 0
 
         while q:
             state, i = q.popleft()
@@ -245,10 +310,18 @@ class NetQuality:
 
             if key in visited:
                 continue
+
+            if (
+                self.max_nodes_per_replay is not None
+                and explored_nodes >= self.max_nodes_per_replay
+            ):
+                break
+
             visited.add(key)
+            explored_nodes += 1
 
             if i == len(ev.binding_sequence):
-                enabled |= self._enabled_labels(state)
+                enabled |= self._enabled_labels(state, ev.context_tokens_by_type)
 
             if i < len(ev.binding_sequence):
                 for ns in self._fire_visible(state, ev.binding_sequence[i]):
@@ -257,15 +330,45 @@ class NetQuality:
                 for ns in self._fire_silent(state):
                     q.append((ns, i))
 
-        return enabled
+        result = frozenset(enabled)
+        self._replay_cache[replay_key] = result
+        return result
+
+    def _replay_signature(self, ev):
+        def objects_sig(objects_by_type):
+            return tuple(
+                (ot, len(tokens))
+                for ot, tokens in objects_by_type
+                if tokens
+            )
+
+        return (
+            ev.context_key,
+            tuple(
+                (step.label, objects_sig(step.objects_by_type))
+                for step in ev.binding_sequence
+            ),
+            objects_sig(ev.context_tokens_by_type),
+            self.max_nodes_per_replay,
+        )
 
     def _initial_state(self, ev):
         mc = self._ensure_model_cache()
-        state = {}
+        tokens_by_type = defaultdict(set)
 
         for ot, tokens in ev.context_tokens_by_type:
+            tokens_by_type[ot].update(tokens)
+
+        for step in ev.binding_sequence:
+            for ot, tokens in step.objects_by_type:
+                tokens_by_type[ot].update(tokens)
+
+        state = {}
+
+        for ot, tokens in tokens_by_type.items():
             if not tokens:
                 continue
+
             for p in mc.initial_places_by_type.get(ot, ()):
                 state[p] = len(tokens)
 
@@ -273,13 +376,47 @@ class NetQuality:
 
     def _fire_visible(self, state, step):
         mc = self._ensure_model_cache()
-        res = []
+        by_type = mc.visible_transitions_by_label_type.get(step.label)
 
-        for combo in mc.visible_combinations_by_label.get(step.label, ()):
-            if all(self._enabled(state, t.input_places) for _, t in combo):
+        if not by_type:
+            return []
+
+        object_counts = {
+            ot: len(tokens)
+            for ot, tokens in step.objects_by_type
+            if tokens
+        }
+
+        if not object_counts:
+            return []
+
+        required_types = tuple(sorted(object_counts))
+
+        # Approximation:
+        # every object type present in the log binding must have a local
+        # transition for this label. Object types not present in the binding
+        # are ignored, which makes this tolerant of variable participation.
+        if any(ot not in by_type for ot in required_types):
+            return []
+
+        res = []
+        transition_choices = [by_type[ot] for ot in required_types]
+
+        for combo in product(*transition_choices):
+            if all(
+                self._enabled(state, t.input_places, object_counts[ot])
+                for ot, t in zip(required_types, combo)
+            ):
                 ns = state.copy()
-                for _, t in combo:
-                    self._move(ns, t.input_places, t.output_places)
+
+                for ot, t in zip(required_types, combo):
+                    self._move(
+                        ns,
+                        t.input_places,
+                        t.output_places,
+                        amount=object_counts[ot],
+                    )
+
                 res.append(ns)
 
         return res
@@ -296,28 +433,61 @@ class NetQuality:
 
         return res
 
-    def _enabled(self, state, places):
-        return all(state.get(p, 0) > 0 for p in places)
+    def _enabled(self, state, places, amount: int = 1):
+        if amount <= 0:
+            return True
 
-    def _move(self, state, inp, out):
+        return all(state.get(p, 0) >= amount for p in places)
+
+    def _move(self, state, inp, out, amount: int = 1):
+        if amount <= 0:
+            return
+
         for p in inp:
-            state[p] = state.get(p, 0) - 1
+            state[p] = state.get(p, 0) - amount
+
             if state[p] <= 0:
                 state.pop(p, None)
-        for p in out:
-            state[p] = state.get(p, 0) + 1
 
-    def _enabled_labels(self, state):
+        for p in out:
+            state[p] = state.get(p, 0) + amount
+
+    def _enabled_labels(self, state, context_tokens_by_type):
         mc = self._ensure_model_cache()
-        key = self._state_key(state)
+
+        object_counts = tuple(
+            sorted(
+                (ot, len(tokens))
+                for ot, tokens in context_tokens_by_type
+                if tokens
+            )
+        )
+
+        key = (self._state_key(state), object_counts)
 
         if key in mc.enabled_labels_cache:
             return mc.enabled_labels_cache[key]
 
+        if not object_counts:
+            mc.enabled_labels_cache[key] = frozenset()
+            return mc.enabled_labels_cache[key]
+
+        required_types = tuple(ot for ot, _ in object_counts)
+        counts_by_type = dict(object_counts)
+
         enabled = set()
-        for label, combos in mc.visible_combinations_by_label.items():
-            for combo in combos:
-                if all(self._enabled(state, t.input_places) for _, t in combo):
+
+        for label, by_type in mc.visible_transitions_by_label_type.items():
+            if any(ot not in by_type for ot in required_types):
+                continue
+
+            transition_choices = [by_type[ot] for ot in required_types]
+
+            for combo in product(*transition_choices):
+                if all(
+                    self._enabled(state, t.input_places, counts_by_type[ot])
+                    for ot, t in zip(required_types, combo)
+                ):
                     enabled.add(label)
                     break
 
@@ -326,12 +496,20 @@ class NetQuality:
 
     def _state_key(self, state):
         mc = self._ensure_model_cache()
-        return tuple((mc.place_ids[p], c) for p, c in state.items())
+        return tuple(
+            sorted(
+                (mc.place_ids[p], c)
+                for p, c in state.items()
+            )
+        )
 
     # -------------------------
-    # LOG PREP (simplified)
+    # LOG PREPARATION
     # -------------------------
     def _prepare_log(self, ocel):
+        if ocel is None:
+            raise ValueError("No OCEL was provided.")
+
         events = ocel.events
         rel = ocel.relations
 
@@ -340,38 +518,112 @@ class NetQuality:
         obj = ocel.object_id_column
         typ = ocel.object_type_column
 
-        ordered = tuple(events[eid])
-        act_map = dict(zip(events[eid], events[act]))
+        ts_col = getattr(ocel, "event_timestamp", None)
+
+        if ts_col is not None and ts_col in events.columns:
+            ordered = tuple(events.sort_values(ts_col, kind="stable")[eid])
+        else:
+            ordered = tuple(events[eid])
+
+        event_order_index = {
+            event_id: i
+            for i, event_id in enumerate(ordered)
+        }
+
+        act_map = {
+            event_id: str(activity)
+            for event_id, activity in zip(events[eid], events[act])
+        }
 
         event_tokens = defaultdict(list)
+
         for e, o, t in rel[[eid, obj, typ]].itertuples(index=False):
-            event_tokens[e].append((t, o))
+            event_tokens[e].append((str(t), o))
+
+        def objects_by_type_for_event(event_id):
+            by_type = defaultdict(list)
+
+            for ot, oid in event_tokens.get(event_id, ()):
+                by_type[ot].append((ot, oid))
+
+            return tuple(
+                (ot, tuple(tokens))
+                for ot, tokens in sorted(by_type.items())
+            )
 
         ctx = {}
         log_enabled = defaultdict(set)
         replay = defaultdict(list)
 
+        # Recent history per concrete object.
+        seen_by_object = defaultdict(lambda: deque(maxlen=self._history_window))
+
         for e in ordered:
+            current_tokens = event_tokens.get(e, ())
+            current_objects_by_type = objects_by_type_for_event(e)
+
             context = defaultdict(Counter)
+            pred_events = set()
 
-            for t, o in event_tokens[e]:
-                context[t][()] += 1
+            for ot, oid in current_tokens:
+                history = tuple(seen_by_object[(ot, oid)])
+                recent_history = history[-self._history_window:]
 
-            key = tuple(sorted((t, tuple(c.items())) for t, c in context.items()))
+                pred_events.update(recent_history)
+
+                history_labels = tuple(
+                    act_map[pe]
+                    for pe in recent_history
+                )
+
+                context[ot][history_labels] += 1
+
+            key = tuple(
+                sorted(
+                    (
+                        ot,
+                        tuple(sorted(counter.items())),
+                    )
+                    for ot, counter in context.items()
+                )
+            )
+
+            pred_events_ordered = tuple(
+                sorted(
+                    pred_events,
+                    key=event_order_index.__getitem__,
+                )
+            )
+
+            binding_sequence = tuple(
+                _BindingStep(
+                    label=act_map[pe],
+                    objects_by_type=objects_by_type_for_event(pe),
+                )
+                for pe in pred_events_ordered
+            )
+
             ctx[e] = key
             log_enabled[key].add(act_map[e])
 
             replay[key].append(
                 _ReplayEvent(
-                    key,
-                    (),
-                    tuple((t, tuple(v)) for t, v in context.items()),
+                    context_key=key,
+                    binding_sequence=binding_sequence,
+                    context_tokens_by_type=current_objects_by_type,
                 )
             )
+
+            # Update histories only after preparing replay for this event.
+            for ot, oid in current_tokens:
+                seen_by_object[(ot, oid)].append(e)
 
         return {
             "events": ordered,
             "ctx": ctx,
-            "log": {k: frozenset(v) for k, v in log_enabled.items()},
+            "log": {
+                k: frozenset(v)
+                for k, v in log_enabled.items()
+            },
             "replay": replay,
         }

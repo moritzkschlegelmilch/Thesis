@@ -346,9 +346,11 @@ def _build_ocel_from_filtering_context(filtering_context):
 
 
 def _discover_ocpn_with_subprocess_components(layer_ocel, activity_to_layer, reference_layer):
+    print('discover ocpn')
     ocpn = _discover_ocpn(layer_ocel)
     if ocpn is None:
         return None, []
+    print('end discover ocpn')
 
     #pm4py.view_ocpn(ocpn, format="png", bgcolor="white")
     print('start detecting subprocesses')
@@ -456,13 +458,13 @@ def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, com
         lower_layer_ocel=lower_layer_ocel,
     )
 
+    print('start precision')
     precision_with_component = 0.0
     if component_and_edge_ocpn is not None and component_and_edge_ocel is not None:
         precision_with_component = float(
             NetQuality(
                 component_and_edge_ocpn,
                 component_and_edge_ocel,
-                max_nodes_per_replay=100,
             ).precision()
         )
 
@@ -472,9 +474,10 @@ def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, com
             NetQuality(
                 edge_only_ocpn,
                 component_and_edge_ocel,
-                max_nodes_per_replay=10
             ).precision()
         )
+    print('end precision')
+
     information_loss = 1 - (precision_without_component / precision_with_component)
 
     return information_loss
@@ -614,6 +617,7 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
 
     precision_with_component = 0.0
     if component_and_edge_ocpn is not None and component_and_edge_ocel is not None:
+        print('start computing precision')
         precision_with_component = float(
             NetQuality(
                 component_and_edge_ocpn,
@@ -621,9 +625,11 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
                 max_nodes_per_replay=100,
             ).precision()
         )
+        print('end computing precision')
 
     precision_without_component = 0.0
     if edge_only_ocpn is not None and component_and_edge_ocel is not None:
+        print('start computing precision')
         precision_without_component = float(
             NetQuality(
                 edge_only_ocpn,
@@ -631,6 +637,7 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
                 max_nodes_per_replay=10,
             ).precision()
         )
+        print('end computing precision')
 
     candidate_label = candidate.get("id") or ",".join(component_activities)
     safe_candidate_label = "".join(
@@ -685,18 +692,23 @@ def _select_best_pruning_candidate(current_model, current_ocel, lower_layer_ocel
     best_score = float("-inf")
 
     for candidate in candidates:
+        print('start calculating cadidate')
         simplicity_gain = _compute_simplicity_gain(
             current_model,
             current_ocel,
             lower_layer_ocel,
             candidate,
         )
+
+        print('start precision loss')
         information_loss = _compute_information_loss(
             current_model,
             current_ocel,
             lower_layer_ocel,
             candidate,
         )
+        print('end precision loss')
+        print('end calculating cadidate')
         score = simplicity_gain - information_loss
 
         if score > best_score:
@@ -748,18 +760,24 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
                 active_activities,
             )
 
+            print('discovering layer', layer)
+
             ocpn, iteration_components = _discover_ocpn_with_subprocess_components(
                 layer_ocel,
                 activity_to_layer,
                 layer,
             )
 
+            pm4py.view_ocpn(ocpn, format="png", bgcolor="white")
+
+            print('build candidates')
             candidates = _build_pruning_candidates(
                 iteration_components,
                 included_activities,
                 activity_to_layer,
                 layer,
             )
+            print('end building candidates')
 
             best_candidate, best_score = _select_best_pruning_candidate(
                 ocpn,
