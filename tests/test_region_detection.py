@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 
 os.environ.setdefault("MPLCONFIGDIR", "/tmp")
 
@@ -81,6 +82,47 @@ def _typed_transition_labels(typed_vertices):
 
 
 class RegionDetectionTests(unittest.TestCase):
+    def test_detect_object_centric_regions_only_checks_boundary_pairs_within_same_component(self):
+        item_net, _ = _build_net(
+            "item",
+            places=["p0", "p1", "p2", "q0", "q1", "q2"],
+            transitions={
+                "a_item": "a",
+                "b_item": "b",
+                "c_item": "c",
+                "d_item": "d",
+            },
+            arcs=[
+                ("p0", "a_item"),
+                ("a_item", "p1"),
+                ("p1", "b_item"),
+                ("b_item", "p2"),
+                ("q0", "c_item"),
+                ("c_item", "q1"),
+                ("q1", "d_item"),
+                ("d_item", "q2"),
+            ],
+        )
+        ocpn = _build_ocpn({"item": (item_net, {})})
+
+        original_function = detect_object_centric_regions.__globals__["_largest_region_for_pair_inside_universe"]
+        observed_pairs = []
+
+        def recording_wrapper(context, allowed_vertices, source, target):
+            observed_pairs.append((source.name, target.name))
+            return original_function(context, allowed_vertices, source, target)
+
+        with patch(
+            "repo.discovery.region_detection._largest_region_for_pair_inside_universe",
+            side_effect=recording_wrapper,
+        ):
+            detect_object_centric_regions(ocpn, {"a", "b", "c", "d"})
+
+        self.assertIn(("p0", "p2"), observed_pairs)
+        self.assertIn(("q0", "q2"), observed_pairs)
+        self.assertNotIn(("p0", "q0"), observed_pairs)
+        self.assertNotIn(("p1", "q1"), observed_pairs)
+
     def test_detect_object_centric_regions_filters_disallowed_visible_activities(self):
         item_net, _ = _build_net(
             "item",

@@ -239,23 +239,28 @@ def _maximal_regions_avoiding_labels(context, blocked_activities):
 
 def _maximal_regions_inside_universe(context, universe, forbidden_transitions):
     allowed_vertices = frozenset(universe) - frozenset(forbidden_transitions)
-    allowed_places = [
-        place
-        for place in context.places
-        if place in allowed_vertices
-    ]
-
     regions = set()
-    for source in allowed_places:
-        for target in allowed_places:
-            region = _largest_region_for_pair_inside_universe(
-                context,
-                allowed_vertices,
-                source,
-                target,
-            )
-            if region is not None and region.internal:
-                regions.add(region)
+    allowed_components = _weakly_connected_components(
+        context.undirected_neighbors,
+        allowed_vertices,
+        _sort_vertex,
+    )
+    for component in allowed_components:
+        component_places = [
+            place
+            for place in context.places
+            if place in component
+        ]
+        for source in component_places:
+            for target in component_places:
+                region = _largest_region_for_pair_inside_universe(
+                    context,
+                    allowed_vertices,
+                    source,
+                    target,
+                )
+                if region is not None and region.internal:
+                    regions.add(region)
 
     return _keep_only_inclusion_maximal_regions_of_same_type(regions)
 
