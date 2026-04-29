@@ -434,16 +434,18 @@ def _build_pruning_candidates(subprocess_components, included_activities, activi
     return candidates
 
 
-def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, component):
-    component_activities = tuple(component.get("activities", ()))
-    if current_model is None or current_ocel is None or not component_activities:
-        return 1
-
+def _prepare_pruning_candidate_context(
+    current_model,
+    current_ocel,
+    lower_layer_ocel,
+    component_activities,
+    *,
+    build_component_and_edge_ocel,
+):
     from .component_deletion_impact import (
         _build_component_and_edge_ocels,
         discover_component_and_edge_ocpns,
     )
-    from .net_quality import NetQuality
 
     component_and_edge_ocpn, edge_only_ocpn = discover_component_and_edge_ocpns(
         current_ocel,
@@ -451,12 +453,33 @@ def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, com
         component_activities,
         lower_layer_ocel=lower_layer_ocel,
     )
-    component_and_edge_ocel, _ = _build_component_and_edge_ocels(
-        current_ocel,
-        current_model,
-        component_activities,
-        lower_layer_ocel=lower_layer_ocel,
-    )
+
+    component_and_edge_ocel = None
+    if build_component_and_edge_ocel:
+        component_and_edge_ocel, _ = _build_component_and_edge_ocels(
+            current_ocel,
+            current_model,
+            component_activities,
+            lower_layer_ocel=lower_layer_ocel,
+        )
+
+    return {
+        "component_activities": component_activities,
+        "component_and_edge_ocpn": component_and_edge_ocpn,
+        "edge_only_ocpn": edge_only_ocpn,
+        "component_and_edge_ocel": component_and_edge_ocel,
+    }
+
+
+def _compute_information_loss_from_prepared_context(prepared_context):
+    if prepared_context is None:
+        return 1
+
+    from .net_quality import NetQuality
+
+    component_and_edge_ocpn = prepared_context["component_and_edge_ocpn"]
+    edge_only_ocpn = prepared_context["edge_only_ocpn"]
+    component_and_edge_ocel = prepared_context["component_and_edge_ocel"]
 
     print('start precision')
     precision_with_component = 0.0
@@ -483,20 +506,31 @@ def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, com
     return information_loss
 
 
-def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, component):
+def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, component):
     component_activities = tuple(component.get("activities", ()))
-    if current_model is None or not component_activities:
+    if current_model is None or current_ocel is None or not component_activities:
+        return 1
+
+    prepared_context = _prepare_pruning_candidate_context(
+        current_model,
+        current_ocel,
+        lower_layer_ocel,
+        component_activities,
+        build_component_and_edge_ocel=True,
+    )
+
+    return _compute_information_loss_from_prepared_context(prepared_context)
+
+
+def _compute_simplicity_gain_from_prepared_context(prepared_context, component):
+    if prepared_context is None:
         return 0
 
-    from .component_deletion_impact import discover_component_and_edge_ocpns
     from .net_quality import NetQuality
 
-    component_and_edge_ocpn, edge_only_ocpn = discover_component_and_edge_ocpns(
-        current_ocel,
-        current_model,
-        component_activities,
-        lower_layer_ocel=lower_layer_ocel,
-    )
+    component_activities = prepared_context["component_activities"]
+    component_and_edge_ocpn = prepared_context["component_and_edge_ocpn"]
+    edge_only_ocpn = prepared_context["edge_only_ocpn"]
 
     if component_and_edge_ocpn is None:
         return 0
@@ -538,6 +572,22 @@ def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, comp
     return simplicity_gain
 
 
+def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, component):
+    component_activities = tuple(component.get("activities", ()))
+    if current_model is None or current_ocel is None or not component_activities:
+        return 0
+
+    prepared_context = _prepare_pruning_candidate_context(
+        current_model,
+        current_ocel,
+        lower_layer_ocel,
+        component_activities,
+        build_component_and_edge_ocel=False,
+    )
+
+    return _compute_simplicity_gain_from_prepared_context(prepared_context, component)
+
+
 def _build_collapsed_subprocess_model(component_and_edge_ocpn, component_activities):
     if component_and_edge_ocpn is None:
         return None
@@ -577,25 +627,19 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
     if current_model is None or current_ocel is None or not component_activities:
         return
 
-    from .component_deletion_impact import (
-        _build_component_and_edge_ocels,
-        discover_component_and_edge_ocpns,
-    )
     from .net_quality import NetQuality
     from ..helpers.vorbose import render_pruning_candidate_debug
 
-    component_and_edge_ocpn, edge_only_ocpn = discover_component_and_edge_ocpns(
-        current_ocel,
+    prepared_context = _prepare_pruning_candidate_context(
         current_model,
-        component_activities,
-        lower_layer_ocel=lower_layer_ocel,
-    )
-    component_and_edge_ocel, _ = _build_component_and_edge_ocels(
         current_ocel,
-        current_model,
+        lower_layer_ocel,
         component_activities,
-        lower_layer_ocel=lower_layer_ocel,
+        build_component_and_edge_ocel=True,
     )
+    component_and_edge_ocpn = prepared_context["component_and_edge_ocpn"]
+    edge_only_ocpn = prepared_context["edge_only_ocpn"]
+    component_and_edge_ocel = prepared_context["component_and_edge_ocel"]
 
     if component_and_edge_ocpn is None and edge_only_ocpn is None:
         return
@@ -693,20 +737,20 @@ def _select_best_pruning_candidate(current_model, current_ocel, lower_layer_ocel
 
     for candidate in candidates:
         print('start calculating cadidate')
-        simplicity_gain = _compute_simplicity_gain(
-            current_model,
-            current_ocel,
-            lower_layer_ocel,
-            candidate,
-        )
+        component_activities = tuple(candidate.get("activities", ()))
+        prepared_context = None
+        if current_model is not None and current_ocel is not None and component_activities:
+            prepared_context = _prepare_pruning_candidate_context(
+                current_model,
+                current_ocel,
+                lower_layer_ocel,
+                component_activities,
+                build_component_and_edge_ocel=True,
+            )
+        simplicity_gain = _compute_simplicity_gain_from_prepared_context(prepared_context, candidate)
 
         print('start precision loss')
-        information_loss = _compute_information_loss(
-            current_model,
-            current_ocel,
-            lower_layer_ocel,
-            candidate,
-        )
+        information_loss = _compute_information_loss_from_prepared_context(prepared_context)
         print('end precision loss')
         print('end calculating cadidate')
         score = simplicity_gain - information_loss
@@ -767,8 +811,6 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
                 activity_to_layer,
                 layer,
             )
-
-            pm4py.view_ocpn(ocpn, format="png", bgcolor="white")
 
             print('build candidates')
             candidates = _build_pruning_candidates(
