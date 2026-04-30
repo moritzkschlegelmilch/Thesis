@@ -503,6 +503,17 @@ class NetQuality:
             )
         )
 
+    def _group_event_tokens_by_type(self, tokens):
+        by_type = defaultdict(list)
+
+        for ot, oid in tokens:
+            by_type[ot].append((ot, oid))
+
+        return tuple(
+            (ot, tuple(grouped_tokens))
+            for ot, grouped_tokens in sorted(by_type.items())
+        )
+
     # -------------------------
     # LOG PREPARATION
     # -------------------------
@@ -540,16 +551,14 @@ class NetQuality:
         for e, o, t in rel[[eid, obj, typ]].itertuples(index=False):
             event_tokens[e].append((str(t), o))
 
+        objects_by_type_cache = {}
+
         def objects_by_type_for_event(event_id):
-            by_type = defaultdict(list)
-
-            for ot, oid in event_tokens.get(event_id, ()):
-                by_type[ot].append((ot, oid))
-
-            return tuple(
-                (ot, tuple(tokens))
-                for ot, tokens in sorted(by_type.items())
-            )
+            if event_id not in objects_by_type_cache:
+                objects_by_type_cache[event_id] = self._group_event_tokens_by_type(
+                    event_tokens.get(event_id, ())
+                )
+            return objects_by_type_cache[event_id]
 
         ctx = {}
         log_enabled = defaultdict(set)

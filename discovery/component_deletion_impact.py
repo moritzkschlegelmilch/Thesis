@@ -201,7 +201,7 @@ def _build_component_and_edge_ocels(ocel, ocpn, component_activity_labels, lower
     return component_and_edge_ocel, edge_only_ocel
 
 
-def discover_component_and_edge_ocpns(ocel, ocpn, component_activity_labels, lower_layer_ocel=None):
+def discover_component_and_edge_models(ocel, ocpn, component_activity_labels, lower_layer_ocel=None):
     component_and_edge_ocel, edge_only_ocel = _build_component_and_edge_ocels(
         ocel,
         ocpn,
@@ -210,6 +210,16 @@ def discover_component_and_edge_ocpns(ocel, ocpn, component_activity_labels, low
     )
     component_and_edge_ocpn = _discover_ocpn(component_and_edge_ocel)
     edge_only_ocpn = _discover_ocpn(edge_only_ocel)
+    return component_and_edge_ocel, edge_only_ocel, component_and_edge_ocpn, edge_only_ocpn
+
+
+def discover_component_and_edge_ocpns(ocel, ocpn, component_activity_labels, lower_layer_ocel=None):
+    _, _, component_and_edge_ocpn, edge_only_ocpn = discover_component_and_edge_models(
+        ocel,
+        ocpn,
+        component_activity_labels,
+        lower_layer_ocel=lower_layer_ocel,
+    )
     return component_and_edge_ocpn, edge_only_ocpn
 
 

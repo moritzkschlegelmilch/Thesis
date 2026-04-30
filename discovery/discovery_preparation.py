@@ -4,9 +4,13 @@ from numbers import Integral
 import pandas as pd
 import pm4py
 from pm4py.objects.ocel.obj import OCEL
+from pm4py.objects.petri_net.obj import PetriNet
 
 from .totem import _prepare_totem_data, get_all_event_objects
-from .subprocess_detection import collapse_sub_processes, detect_subprocess_components
+from .subprocess_detection import _component_boundary_places, collapse_sub_processes, detect_subprocess_components
+
+# Cache filtering contexts by OCEL object identity.
+_OCEL_FILTERING_CONTEXT_CACHE: dict[int, dict] = {}
 
 
 def _ocel_event_id_column(ocel):
@@ -97,12 +101,24 @@ def _extract_ocel_filtering_context(ocel):
 
 
 def _build_ocel_filtering_context(ocel):
-    object_to_type, event_records = _extract_ocel_filtering_context(ocel)
-    return {
-        "object_to_type": dict(object_to_type),
-        "event_records": tuple(event_records),
-        "o2o_edges": tuple(_iter_ocel_o2o_edges(ocel)),
-    }
+    cache_key = id(ocel)
+
+    if cache_key not in _OCEL_FILTERING_CONTEXT_CACHE:
+        object_to_type, event_records = _extract_ocel_filtering_context(ocel)
+        _OCEL_FILTERING_CONTEXT_CACHE[cache_key] = {
+            "object_to_type": dict(object_to_type),
+            "event_records": tuple(event_records),
+            "o2o_edges": tuple(_iter_ocel_o2o_edges(ocel)),
+        }
+
+    return _OCEL_FILTERING_CONTEXT_CACHE[cache_key]
+
+
+def clear_ocel_filtering_context_cache(ocel=None):
+    if ocel is None:
+        _OCEL_FILTERING_CONTEXT_CACHE.clear()
+    else:
+        _OCEL_FILTERING_CONTEXT_CACHE.pop(id(ocel), None)
 
 
 def _filter_ocel_filtering_context(filtering_context, selected_activities):
@@ -397,9 +413,99 @@ def _component_place_count(component):
     return len(component.get("place_keys", ()))
 
 
+def _component_boundary_adjacent_activities(component, activity_to_layer, reference_layer):
+    adjacent_activities = set()
+
+    for boundary_place_data in _component_boundary_places(component).values():
+        for place in boundary_place_data["input"]:
+            for arc in place.in_arcs:
+                if not isinstance(arc.source, PetriNet.Transition):
+                    continue
+                if arc.source.label is None:
+                    continue
+                if activity_to_layer.get(arc.source.label, float("inf")) < reference_layer:
+                    adjacent_activities.add(arc.source.label)
+
+        for place in boundary_place_data["output"]:
+            for arc in place.out_arcs:
+                if not isinstance(arc.target, PetriNet.Transition):
+                    continue
+                if arc.target.label is None:
+                    continue
+                if activity_to_layer.get(arc.target.label, float("inf")) < reference_layer:
+                    adjacent_activities.add(arc.target.label)
+
+    return adjacent_activities
+
+
+def _candidate_subprocess_activity_groups(candidate):
+    groups = candidate.get("subprocess_activity_groups")
+    if groups is not None:
+        return tuple(
+            tuple(group)
+            for group in groups
+            if group
+        )
+
+    if candidate.get("kind") == "subprocess":
+        component_activities = tuple(candidate.get("activities", ()))
+        if component_activities:
+            return (component_activities,)
+
+    return ()
+
+
+def _match_subprocess_components_by_activity_groups(component_and_edge_ocpn, subprocess_activity_groups):
+    if component_and_edge_ocpn is None or not subprocess_activity_groups:
+        return ()
+
+    subprocess_activities = {
+        activity
+        for group in subprocess_activity_groups
+        for activity in group
+    }
+    activity_to_layer = {
+        activity: 1 if activity in subprocess_activities else 2
+        for activity in component_and_edge_ocpn.get("activities", ())
+    }
+    collapsed_components = list(detect_subprocess_components(
+        component_and_edge_ocpn,
+        activity_to_layer,
+        reference_layer=2,
+    ))
+
+    matching_components = []
+    for activity_group in subprocess_activity_groups:
+        matches = [
+            candidate_component
+            for candidate_component in collapsed_components
+            if set(_component_visible_activities(candidate_component)) == set(activity_group)
+        ]
+        if not matches:
+            continue
+
+        matches.sort(
+            key=lambda candidate_component: (
+                -_component_transition_count(candidate_component),
+                -_component_place_count(candidate_component),
+            ),
+        )
+        chosen_component = matches[0]
+        matching_components.append(chosen_component)
+        collapsed_components.remove(chosen_component)
+
+    return tuple(matching_components)
+
+
 def _build_pruning_candidates(subprocess_components, included_activities, activity_to_layer, reference_layer):
     candidates = []
-    covered_lower_layer_activities = set()
+    subprocess_candidates = []
+    covered_subprocess_activities = set()
+    standalone_lower_layer_activities = {
+        activity
+        for activity in included_activities
+        if activity_to_layer.get(activity, float("inf")) < reference_layer
+    }
 
     for component in subprocess_components:
         component_activities = tuple(
@@ -410,17 +516,84 @@ def _build_pruning_candidates(subprocess_components, included_activities, activi
         if not component_activities:
             continue
 
-        candidates.append({
+        subprocess_candidates.append({
             "kind": "subprocess",
             "id": getattr(component, "id", None),
             "activities": component_activities,
             "component": component,
+            "subprocess_components": (component,),
+            "subprocess_activity_groups": (component_activities,),
+            "boundary_adjacent_activities": _component_boundary_adjacent_activities(
+                component,
+                activity_to_layer,
+                reference_layer,
+            ),
         })
-        covered_lower_layer_activities.update(component_activities)
+        covered_subprocess_activities.update(component_activities)
 
-    for activity in sorted(included_activities):
-        if activity_to_layer.get(activity, float("inf")) >= reference_layer:
-            continue
+    standalone_activities = standalone_lower_layer_activities - covered_subprocess_activities
+    activity_to_subprocess_indices = defaultdict(list)
+    for index, candidate in enumerate(subprocess_candidates):
+        attached_activities = tuple(sorted(
+            activity
+            for activity in candidate.pop("boundary_adjacent_activities", ())
+            if activity in standalone_activities
+        ))
+        candidate["attached_activities"] = attached_activities
+        for activity in attached_activities:
+            activity_to_subprocess_indices[activity].append(index)
+
+    parent = list(range(len(subprocess_candidates)))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left, right):
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for indices in activity_to_subprocess_indices.values():
+        for index in indices[1:]:
+            union(indices[0], index)
+
+    grouped_indices = defaultdict(list)
+    for index in range(len(subprocess_candidates)):
+        grouped_indices[find(index)].append(index)
+
+    covered_lower_layer_activities = set()
+    for root_index in sorted(grouped_indices):
+        group = grouped_indices[root_index]
+        group_subprocess_components = []
+        group_subprocess_activity_groups = []
+        group_activities = set()
+        group_ids = []
+
+        for index in group:
+            candidate = subprocess_candidates[index]
+            group_subprocess_components.extend(candidate.get("subprocess_components", ()))
+            group_subprocess_activity_groups.extend(candidate.get("subprocess_activity_groups", ()))
+            group_activities.update(candidate.get("activities", ()))
+            group_activities.update(candidate.get("attached_activities", ()))
+            if candidate.get("id") is not None:
+                group_ids.append(candidate["id"])
+
+        grouped_candidate_activities = tuple(sorted(group_activities))
+        candidates.append({
+            "kind": "subprocess",
+            "id": group_ids[0] if len(group_ids) == 1 else None,
+            "activities": grouped_candidate_activities,
+            "component": group_subprocess_components[0] if len(group_subprocess_components) == 1 else None,
+            "subprocess_components": tuple(group_subprocess_components),
+            "subprocess_activity_groups": tuple(group_subprocess_activity_groups),
+        })
+        covered_lower_layer_activities.update(grouped_candidate_activities)
+
+    for activity in sorted(standalone_activities):
         if activity in covered_lower_layer_activities:
             continue
 
@@ -443,25 +616,18 @@ def _prepare_pruning_candidate_context(
     build_component_and_edge_ocel,
 ):
     from .component_deletion_impact import (
-        _build_component_and_edge_ocels,
-        discover_component_and_edge_ocpns,
+        discover_component_and_edge_models,
     )
 
-    component_and_edge_ocpn, edge_only_ocpn = discover_component_and_edge_ocpns(
+    component_and_edge_ocel, _, component_and_edge_ocpn, edge_only_ocpn = discover_component_and_edge_models(
         current_ocel,
         current_model,
         component_activities,
         lower_layer_ocel=lower_layer_ocel,
     )
 
-    component_and_edge_ocel = None
-    if build_component_and_edge_ocel:
-        component_and_edge_ocel, _ = _build_component_and_edge_ocels(
-            current_ocel,
-            current_model,
-            component_activities,
-            lower_layer_ocel=lower_layer_ocel,
-        )
+    if not build_component_and_edge_ocel:
+        component_and_edge_ocel = None
 
     return {
         "component_activities": component_activities,
@@ -536,31 +702,16 @@ def _compute_simplicity_gain_from_prepared_context(prepared_context, component):
         return 0
 
     complexity_with_component_ocpn = component_and_edge_ocpn
-    if component.get("kind") == "subprocess":
-        activity_to_layer = {
-            activity: 1 if activity in component_activities else 2
-            for activity in component_and_edge_ocpn.get("activities", ())
-        }
-        collapsed_components = detect_subprocess_components(
+    subprocess_activity_groups = _candidate_subprocess_activity_groups(component)
+    if subprocess_activity_groups:
+        matching_components = _match_subprocess_components_by_activity_groups(
             component_and_edge_ocpn,
-            activity_to_layer,
-            reference_layer=2,
+            subprocess_activity_groups,
         )
-        matching_components = [
-            candidate_component
-            for candidate_component in collapsed_components
-            if set(_component_visible_activities(candidate_component)) == set(component_activities)
-        ]
         if matching_components:
-            matching_components.sort(
-                key=lambda candidate_component: (
-                    -_component_transition_count(candidate_component),
-                    -_component_place_count(candidate_component),
-                ),
-            )
             complexity_with_component_ocpn, _ = collapse_sub_processes(
                 component_and_edge_ocpn,
-                [matching_components[0]],
+                list(matching_components),
             )
 
     complexity_with_component = float(NetQuality(complexity_with_component_ocpn).complexity())
@@ -588,36 +739,20 @@ def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, comp
     return _compute_simplicity_gain_from_prepared_context(prepared_context, component)
 
 
-def _build_collapsed_subprocess_model(component_and_edge_ocpn, component_activities):
-    if component_and_edge_ocpn is None:
+def _build_collapsed_subprocess_model(component_and_edge_ocpn, subprocess_activity_groups):
+    if component_and_edge_ocpn is None or not subprocess_activity_groups:
         return None
 
-    activity_to_layer = {
-        activity: 1 if activity in component_activities else 2
-        for activity in component_and_edge_ocpn.get("activities", ())
-    }
-    collapsed_components = detect_subprocess_components(
+    matching_components = _match_subprocess_components_by_activity_groups(
         component_and_edge_ocpn,
-        activity_to_layer,
-        reference_layer=2,
+        subprocess_activity_groups,
     )
-    matching_components = [
-        candidate_component
-        for candidate_component in collapsed_components
-        if set(_component_visible_activities(candidate_component)) == set(component_activities)
-    ]
     if not matching_components:
         return component_and_edge_ocpn
 
-    matching_components.sort(
-        key=lambda candidate_component: (
-            -_component_transition_count(candidate_component),
-            -_component_place_count(candidate_component),
-        ),
-    )
     collapsed_ocpn, _ = collapse_sub_processes(
         component_and_edge_ocpn,
-        [matching_components[0]],
+        list(matching_components),
     )
     return collapsed_ocpn
 
@@ -645,10 +780,11 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
         return
 
     debug_with_ocpn = component_and_edge_ocpn
-    if candidate.get("kind") == "subprocess":
+    subprocess_activity_groups = _candidate_subprocess_activity_groups(candidate)
+    if subprocess_activity_groups:
         debug_with_ocpn = _build_collapsed_subprocess_model(
             component_and_edge_ocpn,
-            component_activities,
+            subprocess_activity_groups,
         )
 
     complexity_with_component = 0.0
@@ -783,6 +919,7 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
     for layer_index, layer in enumerate(discovered_layers):
         selected_object_types = layer_to_object_types[layer]
         lower_layer_ocel = None
+        subprocess_components = []
         if layer_index > 0:
             lower_layer = discovered_layers[layer_index - 1]
             lower_layer_ocel = discovered_models[lower_layer]["ocel"]
@@ -811,6 +948,7 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
                 activity_to_layer,
                 layer,
             )
+            subprocess_components = iteration_components
 
             print('build candidates')
             candidates = _build_pruning_candidates(
@@ -848,13 +986,6 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
             for activity in included_activities
             if activity_to_layer[activity] == layer - 1
         )
-        subprocess_components = []
-        if ocpn is not None:
-            subprocess_components = detect_subprocess_components(
-                ocpn,
-                activity_to_layer,
-                layer,
-            )
 
         discovered_models[layer] = {
             "object_types": sorted(selected_object_types),

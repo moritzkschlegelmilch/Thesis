@@ -6,7 +6,7 @@ from repo.helpers.vorbose import render_object_centric_regions
 from totem_lib import import_ocel
 
 
-ocel = import_ocel("example_data/blockchain.xml")
+ocel = import_ocel("example_data/ContainerLogistics.sqlite")
 
 discovery = ProcessAreaDiscovery(ocel)
 discovery.get_layers()

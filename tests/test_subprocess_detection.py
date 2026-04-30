@@ -17,9 +17,12 @@ from repo.discovery.component_deletion_impact import (
     discover_component_and_edge_ocpns,
 )
 from repo.discovery.discovery_preparation import (
+    _build_ocel_filtering_context,
+    _build_pruning_candidates,
     _compute_information_loss,
     _compute_simplicity_gain,
     _select_best_pruning_candidate,
+    clear_ocel_filtering_context_cache,
     discover_models_for_hierarchy,
 )
 from repo.discovery.region_detection import _make_local_region, _make_output_region
@@ -85,6 +88,19 @@ def _build_ocpn(nets_by_object_type):
             for object_type in nets_by_object_type
         },
     }
+
+
+def _node_by_name(nodes, name):
+    return next(node for node in nodes if getattr(node, "name", None) == name)
+
+
+def _arc_by_endpoints(net, source_name, target_name):
+    return next(
+        arc
+        for arc in net.arcs
+        if getattr(arc.source, "name", None) == source_name
+        and getattr(arc.target, "name", None) == target_name
+    )
 
 
 def _activity_labels(component):
@@ -188,6 +204,32 @@ def _build_hierarchy_test_ocel():
 class SubprocessDetectionTests(unittest.TestCase):
     def tearDown(self):
         clear_totem_cache()
+        clear_ocel_filtering_context_cache()
+
+    def test_build_ocel_filtering_context_caches_by_ocel_identity(self):
+        fake_ocel = object()
+        object_to_type = {"item_1": "item"}
+        event_records = [
+            ("e1", "a", pd.Timestamp("2024-01-01T00:00:00"), ("item_1",)),
+        ]
+        o2o_edges = (("item_1", "item_1"),)
+
+        with patch(
+            "repo.discovery.discovery_preparation._extract_ocel_filtering_context",
+            return_value=(object_to_type, event_records),
+        ) as extract_patch, patch(
+            "repo.discovery.discovery_preparation._iter_ocel_o2o_edges",
+            return_value=o2o_edges,
+        ) as edges_patch:
+            first = _build_ocel_filtering_context(fake_ocel)
+            second = _build_ocel_filtering_context(fake_ocel)
+            clear_ocel_filtering_context_cache(fake_ocel)
+            third = _build_ocel_filtering_context(fake_ocel)
+
+        self.assertEqual(first, second)
+        self.assertEqual(first, third)
+        self.assertEqual(extract_patch.call_count, 2)
+        self.assertEqual(edges_patch.call_count, 2)
 
     def test_component_palette_is_unique(self):
         colors = _build_component_colors(24)
@@ -580,6 +622,138 @@ class SubprocessDetectionTests(unittest.TestCase):
         self.assertEqual(_ocpn_activities(edge_only_ocpn), {"a", "b", "x", "y"})
         self.assertEqual(_ocpn_object_types(edge_only_ocpn), {"item", "order"})
 
+    def test_discover_component_and_edge_ocpns_reuses_shared_model_builder(self):
+        with_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
+        without_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
+
+        with patch(
+            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
+            return_value=(object(), object(), with_ocpn, without_ocpn),
+        ) as discover_patch:
+            component_and_edge_ocpn, edge_only_ocpn = discover_component_and_edge_ocpns(
+                ocel=object(),
+                ocpn=object(),
+                component_activity_labels=("a", "b"),
+                lower_layer_ocel=object(),
+            )
+
+        self.assertIs(component_and_edge_ocpn, with_ocpn)
+        self.assertIs(edge_only_ocpn, without_ocpn)
+        discover_patch.assert_called_once()
+
+    def test_build_pruning_candidates_joins_boundary_activities_with_subprocess(self):
+        net = _build_net(
+            "item",
+            places=["in", "mid", "out"],
+            transitions={
+                "start_t": "start",
+                "a_t": "a",
+                "b_t": "b",
+                "end_t": "end",
+            },
+            arcs=[
+                ("start_t", "in"),
+                ("in", "a_t"),
+                ("a_t", "mid"),
+                ("mid", "b_t"),
+                ("b_t", "out"),
+                ("out", "end_t"),
+            ],
+        )
+        place_in = _node_by_name(net.places, "in")
+        place_mid = _node_by_name(net.places, "mid")
+        place_out = _node_by_name(net.places, "out")
+        component = {
+            "id": "subprocess_1",
+            "transitions": [
+                {"kind": "activity", "label": "a"},
+                {"kind": "activity", "label": "b"},
+            ],
+            "transition_keys": (("activity", "a"), ("activity", "b")),
+            "place_keys": (
+                ("place", "item", place_in),
+                ("place", "item", place_mid),
+                ("place", "item", place_out),
+            ),
+            "arc_keys": (
+                ("arc", "item", _arc_by_endpoints(net, "in", "a_t")),
+                ("arc", "item", _arc_by_endpoints(net, "a_t", "mid")),
+                ("arc", "item", _arc_by_endpoints(net, "mid", "b_t")),
+                ("arc", "item", _arc_by_endpoints(net, "b_t", "out")),
+            ),
+        }
+
+        candidates = _build_pruning_candidates(
+            [component],
+            {"start", "a", "b", "end"},
+            {"start": 1, "a": 1, "b": 1, "end": 1},
+            reference_layer=2,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["kind"], "subprocess")
+        self.assertEqual(set(candidates[0]["activities"]), {"start", "a", "b", "end"})
+        self.assertEqual(candidates[0]["subprocess_activity_groups"], (("a", "b"),))
+
+    def test_build_pruning_candidates_merges_subprocesses_sharing_boundary_activity(self):
+        net = _build_net(
+            "item",
+            places=["in_1", "out_1", "in_2", "out_2"],
+            transitions={
+                "a_t": "a",
+                "x_t": "x",
+                "b_t": "b",
+            },
+            arcs=[
+                ("in_1", "a_t"),
+                ("a_t", "out_1"),
+                ("out_1", "x_t"),
+                ("x_t", "in_2"),
+                ("in_2", "b_t"),
+                ("b_t", "out_2"),
+            ],
+        )
+        component_a = {
+            "id": "subprocess_1",
+            "transitions": [{"kind": "activity", "label": "a"}],
+            "transition_keys": (("activity", "a"),),
+            "place_keys": (
+                ("place", "item", _node_by_name(net.places, "in_1")),
+                ("place", "item", _node_by_name(net.places, "out_1")),
+            ),
+            "arc_keys": (
+                ("arc", "item", _arc_by_endpoints(net, "in_1", "a_t")),
+                ("arc", "item", _arc_by_endpoints(net, "a_t", "out_1")),
+            ),
+        }
+        component_b = {
+            "id": "subprocess_2",
+            "transitions": [{"kind": "activity", "label": "b"}],
+            "transition_keys": (("activity", "b"),),
+            "place_keys": (
+                ("place", "item", _node_by_name(net.places, "in_2")),
+                ("place", "item", _node_by_name(net.places, "out_2")),
+            ),
+            "arc_keys": (
+                ("arc", "item", _arc_by_endpoints(net, "in_2", "b_t")),
+                ("arc", "item", _arc_by_endpoints(net, "b_t", "out_2")),
+            ),
+        }
+
+        candidates = _build_pruning_candidates(
+            [component_a, component_b],
+            {"a", "x", "b"},
+            {"a": 1, "x": 1, "b": 1},
+            reference_layer=2,
+        )
+
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(set(candidates[0]["activities"]), {"a", "x", "b"})
+        self.assertEqual(
+            candidates[0]["subprocess_activity_groups"],
+            (("a",), ("b",)),
+        )
+
     def test_compute_information_loss_uses_precision_ratio(self):
         fake_ocel = _FakeInputOCEL(
             {"item_1": "item"},
@@ -604,11 +778,8 @@ class SubprocessDetectionTests(unittest.TestCase):
             raise AssertionError("Unexpected OCPN")
 
         with patch(
-            "repo.discovery.component_deletion_impact.discover_component_and_edge_ocpns",
-            return_value=(with_ocpn, without_ocpn),
-        ), patch(
-            "repo.discovery.component_deletion_impact._build_component_and_edge_ocels",
-            return_value=(fake_ocel, fake_ocel),
+            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
+            return_value=(fake_ocel, fake_ocel, with_ocpn, without_ocpn),
         ), patch(
             "repo.discovery.net_quality.NetQuality",
             side_effect=net_quality_side_effect,
@@ -645,8 +816,8 @@ class SubprocessDetectionTests(unittest.TestCase):
             raise AssertionError("Unexpected OCPN")
 
         with patch(
-            "repo.discovery.component_deletion_impact.discover_component_and_edge_ocpns",
-            return_value=(with_ocpn, without_ocpn),
+            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
+            return_value=(None, None, with_ocpn, without_ocpn),
         ), patch(
             "repo.discovery.net_quality.NetQuality",
             side_effect=net_quality_side_effect,
@@ -696,8 +867,8 @@ class SubprocessDetectionTests(unittest.TestCase):
             raise AssertionError("Unexpected OCPN")
 
         with patch(
-            "repo.discovery.component_deletion_impact.discover_component_and_edge_ocpns",
-            return_value=(with_ocpn, without_ocpn),
+            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
+            return_value=(None, None, with_ocpn, without_ocpn),
         ), patch(
             "repo.discovery.discovery_preparation.detect_subprocess_components",
             return_value=[local_subprocess_component],
@@ -727,6 +898,76 @@ class SubprocessDetectionTests(unittest.TestCase):
         collapse_patch.assert_called_once_with(with_ocpn, [local_subprocess_component])
         self.assertEqual(simplicity_gain, 0.75)
 
+    def test_compute_simplicity_gain_collapses_all_grouped_subprocesses(self):
+        with_ocpn = {
+            "activities": ["a", "x", "b"],
+            "petri_nets": {"item": (object(), object(), object())},
+        }
+        collapsed_with_ocpn = {
+            "activities": ["subprocess_1", "x", "subprocess_2"],
+            "petri_nets": {"item": (object(), object(), object())},
+        }
+        without_ocpn = {
+            "activities": ["x"],
+            "petri_nets": {"item": (object(), object(), object())},
+        }
+        first_component = {
+            "id": "subprocess_1",
+            "transition_keys": (("activity", "a"),),
+            "place_keys": (),
+            "arc_keys": (),
+            "transitions": [{"kind": "activity", "label": "a"}],
+        }
+        second_component = {
+            "id": "subprocess_2",
+            "transition_keys": (("activity", "b"),),
+            "place_keys": (),
+            "arc_keys": (),
+            "transitions": [{"kind": "activity", "label": "b"}],
+        }
+
+        def net_quality_side_effect(ocpn, ocel=None):
+            quality = unittest.mock.Mock()
+            if ocpn is collapsed_with_ocpn:
+                quality.complexity.return_value = 10.0
+                return quality
+            if ocpn is without_ocpn:
+                quality.complexity.return_value = 4.0
+                return quality
+            raise AssertionError("Unexpected OCPN")
+
+        with patch(
+            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
+            return_value=(None, None, with_ocpn, without_ocpn),
+        ), patch(
+            "repo.discovery.discovery_preparation.detect_subprocess_components",
+            return_value=[first_component, second_component],
+        ) as detect_patch, patch(
+            "repo.discovery.discovery_preparation.collapse_sub_processes",
+            return_value=(collapsed_with_ocpn, frozenset()),
+        ) as collapse_patch, patch(
+            "repo.discovery.net_quality.NetQuality",
+            side_effect=net_quality_side_effect,
+        ):
+            simplicity_gain = _compute_simplicity_gain(
+                current_model=object(),
+                current_ocel=object(),
+                lower_layer_ocel=None,
+                component={
+                    "kind": "subprocess",
+                    "activities": ("a", "x", "b"),
+                    "subprocess_activity_groups": (("a",), ("b",)),
+                },
+            )
+
+        detect_patch.assert_called_once_with(
+            with_ocpn,
+            {"a": 1, "x": 2, "b": 1},
+            reference_layer=2,
+        )
+        collapse_patch.assert_called_once_with(with_ocpn, [first_component, second_component])
+        self.assertEqual(simplicity_gain, 0.6)
+
     def test_select_best_pruning_candidate_reuses_component_edge_discovery_for_metrics(self):
         fake_ocel = _FakeInputOCEL(
             {"item_1": "item"},
@@ -750,12 +991,9 @@ class SubprocessDetectionTests(unittest.TestCase):
             raise AssertionError("Unexpected OCPN")
 
         with patch(
-            "repo.discovery.component_deletion_impact.discover_component_and_edge_ocpns",
-            return_value=(with_ocpn, without_ocpn),
+            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
+            return_value=(fake_ocel, fake_ocel, with_ocpn, without_ocpn),
         ) as discover_patch, patch(
-            "repo.discovery.component_deletion_impact._build_component_and_edge_ocels",
-            return_value=(fake_ocel, fake_ocel),
-        ) as build_ocel_patch, patch(
             "repo.discovery.net_quality.NetQuality",
             side_effect=net_quality_side_effect,
         ):
@@ -769,7 +1007,6 @@ class SubprocessDetectionTests(unittest.TestCase):
         self.assertEqual(best_candidate, {"activities": ("a", "b")})
         self.assertEqual(best_score, 0.25)
         self.assertEqual(discover_patch.call_count, 1)
-        self.assertEqual(build_ocel_patch.call_count, 1)
 
     def test_build_component_deletion_highlight_marks_union_across_object_types(self):
         item_net = _build_net(
@@ -1383,11 +1620,8 @@ class SubprocessDetectionTests(unittest.TestCase):
             raise AssertionError("Unexpected OCPN")
 
         with patch(
-            "repo.discovery.component_deletion_impact.discover_component_and_edge_ocpns",
-            return_value=(with_ocpn, without_ocpn),
-        ), patch(
-            "repo.discovery.component_deletion_impact._build_component_and_edge_ocels",
-            return_value=(fake_ocel, fake_ocel),
+            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
+            return_value=(fake_ocel, fake_ocel, with_ocpn, without_ocpn),
         ), patch(
             "repo.helpers.vorbose.render_pruning_candidate_debug",
         ) as render_patch, patch(
@@ -1734,6 +1968,45 @@ class SubprocessDetectionTests(unittest.TestCase):
             sorted(set(layer_two_model["ocel"].events["ocel:activity"].tolist())),
             ["end", "start"],
         )
+
+    def test_layer_discovery_reuses_last_iteration_components(self):
+        ocel = _FakeInputOCEL(
+            {"item_1": "item"},
+            [
+                {"event_id": "e1", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
+            ],
+        )
+        fake_layer_ocel = unittest.mock.Mock()
+        fake_layer_ocel.events = pd.DataFrame({"ocel:activity": ["a"]})
+        expected_components = [{"id": "subprocess_1"}]
+
+        with patch(
+            "repo.discovery.discovery_preparation._build_layer_ocel",
+            return_value=(
+                fake_layer_ocel,
+                [("e1", "a", pd.Timestamp("2024-01-01T00:00:00"), ("item_1",))],
+                ["a"],
+            ),
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_ocpn_with_subprocess_components",
+            return_value=({"activities": ["a"], "petri_nets": {}}, expected_components),
+        ) as discover_patch, patch(
+            "repo.discovery.discovery_preparation._build_pruning_candidates",
+            return_value=[],
+        ), patch(
+            "repo.discovery.discovery_preparation._select_best_pruning_candidate",
+            return_value=(None, 0),
+        ), patch(
+            "repo.discovery.discovery_preparation.detect_subprocess_components",
+            side_effect=AssertionError("Should reuse iteration components"),
+        ):
+            _, discovered_models = discover_models_for_hierarchy(
+                ocel,
+                {"item": 1},
+            )
+
+        self.assertEqual(discovered_models[1]["subprocess_components"], expected_components)
+        discover_patch.assert_called_once()
 
 
 if __name__ == "__main__":

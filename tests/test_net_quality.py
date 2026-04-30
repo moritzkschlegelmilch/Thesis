@@ -333,6 +333,23 @@ class NetQualityTests(unittest.TestCase):
         self.assertEqual(quality.complexity(), 12)
         self.assertEqual(quality.complexity(alpha=2, beta=3), 14)
 
+    def test_prepare_log_groups_each_event_once(self):
+        ocel = _build_single_type_ocel([
+            ["create", "approve", "complete"],
+        ])
+        quality = NetQuality(_build_flower_ocpn(["create", "approve", "complete"]), ocel)
+        original_group = quality._group_event_tokens_by_type
+
+        with mock.patch.object(
+            quality,
+            "_group_event_tokens_by_type",
+            wraps=original_group,
+        ) as group_patch:
+            prepared = quality._prepare_log(ocel)
+
+        self.assertEqual(len(prepared["events"]), 3)
+        self.assertEqual(group_patch.call_count, 3)
+
 
 if __name__ == "__main__":
     unittest.main()
