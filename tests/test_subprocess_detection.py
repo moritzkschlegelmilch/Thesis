@@ -1928,32 +1928,68 @@ class SubprocessDetectionTests(unittest.TestCase):
 
         self.assertIn('color="#123abc:#456def"', graphviz.source)
 
-    def test_layer_discovery_prunes_component_with_default_scores(self):
-        ocel = _build_hierarchy_test_ocel()
-        _, discovered_models = discover_models_for_hierarchy(
-            ocel,
-            {"order": 1, "item": 2},
+    def test_layer_discovery_keeps_only_native_and_detected_subprocess_activities(self):
+        ocel = _FakeInputOCEL(
+            {
+                "item_1": "item",
+                "order_1": "order",
+            },
+            [
+                {"event_id": "e1", "activity": "start", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
+                {"event_id": "e2", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:01:00"), "event_objects": ["item_1", "order_1"]},
+                {"event_id": "e3", "activity": "b", "timestamp": pd.Timestamp("2024-01-01T00:02:00"), "event_objects": ["item_1", "order_1"]},
+                {"event_id": "e4", "activity": "x", "timestamp": pd.Timestamp("2024-01-01T00:03:00"), "event_objects": ["item_1", "order_1"]},
+                {"event_id": "e5", "activity": "end", "timestamp": pd.Timestamp("2024-01-01T00:04:00"), "event_objects": ["item_1"]},
+            ],
         )
+        layer_one_ocel = unittest.mock.Mock()
+        layer_one_ocel.events = pd.DataFrame({"ocel:activity": ["a", "b", "x"]})
+        layer_two_first_ocel = unittest.mock.Mock()
+        layer_two_first_ocel.events = pd.DataFrame({"ocel:activity": ["start", "a", "b", "x", "end"]})
+        layer_two_second_ocel = unittest.mock.Mock()
+        layer_two_second_ocel.events = pd.DataFrame({"ocel:activity": ["start", "a", "b", "end"]})
+        subprocess_component = {
+            "id": "subprocess_1",
+            "transitions": [
+                {"kind": "activity", "label": "a"},
+                {"kind": "activity", "label": "b"},
+            ],
+        }
+        build_layer_calls = []
 
-        layer_two_model = discovered_models[2]
+        def build_layer_ocel_side_effect(_, __, ___, selected_object_types, selected_activities):
+            build_layer_calls.append((set(selected_object_types), set(selected_activities)))
+            if set(selected_object_types) == {"order"}:
+                return layer_one_ocel, [], ["a", "b", "x"]
+            if len(build_layer_calls) == 2:
+                return layer_two_first_ocel, [], ["a", "b", "end", "start", "x"]
+            return layer_two_second_ocel, [], ["a", "b", "end", "start"]
 
-        self.assertEqual(layer_two_model["activities"], ["end", "start"])
-        self.assertEqual(layer_two_model["subprocess_components"], [])
-
-    def test_layer_discovery_recomputes_final_components_after_pruning(self):
-        ocel = _build_hierarchy_test_ocel()
-
-        def simplicity_gain(_, __, lower_layer_ocel, candidate):
-            self.assertIsNotNone(lower_layer_ocel)
-            self.assertEqual(
-                sorted(set(lower_layer_ocel.events["ocel:activity"].tolist())),
-                ["a", "b"],
-            )
-            return 2 if tuple(candidate["activities"]) == ("a", "b") else 0
+        def discover_with_components_side_effect(layer_ocel, *_):
+            if layer_ocel is layer_one_ocel:
+                return {"activities": ["a", "b", "x"], "petri_nets": {}}, []
+            if layer_ocel is layer_two_first_ocel:
+                return {"activities": ["a", "b", "end", "start", "x"], "petri_nets": {}}, [subprocess_component]
+            if layer_ocel is layer_two_second_ocel:
+                return {"activities": ["a", "b", "end", "start"], "petri_nets": {}}, [subprocess_component]
+            raise AssertionError("Unexpected layer OCEL")
 
         with patch(
-            "repo.discovery.discovery_preparation._compute_simplicity_gain",
-            side_effect=simplicity_gain,
+            "repo.discovery.discovery_preparation._build_layer_ocel",
+            side_effect=build_layer_ocel_side_effect,
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_ocpn_with_subprocess_components",
+            side_effect=discover_with_components_side_effect,
+        ), patch(
+            "repo.discovery.discovery_preparation._build_pruning_candidates",
+            side_effect=[
+                [],
+                [{"kind": "subprocess", "activities": ("a", "b")}],
+                [{"kind": "subprocess", "activities": ("a", "b")}],
+            ],
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_activity_resources",
+            return_value={},
         ):
             _, discovered_models = discover_models_for_hierarchy(
                 ocel,
@@ -1962,12 +1998,149 @@ class SubprocessDetectionTests(unittest.TestCase):
 
         layer_two_model = discovered_models[2]
 
-        self.assertEqual(layer_two_model["activities"], ["end", "start"])
-        self.assertEqual(layer_two_model["subprocess_components"], [])
+        self.assertEqual(build_layer_calls[1][1], {"a", "b", "end", "start", "x"})
+        self.assertEqual(build_layer_calls[2][1], {"a", "b", "end", "start"})
+        self.assertEqual(layer_two_model["activities"], ["a", "b", "end", "start"])
         self.assertEqual(
-            sorted(set(layer_two_model["ocel"].events["ocel:activity"].tolist())),
-            ["end", "start"],
+            _component_activity_sets(layer_two_model["subprocess_components"]),
+            {frozenset({"a", "b"})},
         )
+
+    def test_layer_discovery_bypasses_metric_pruning(self):
+        ocel = _FakeInputOCEL(
+            {
+                "item_1": "item",
+                "order_1": "order",
+            },
+            [
+                {"event_id": "e1", "activity": "start", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
+                {"event_id": "e2", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:01:00"), "event_objects": ["item_1", "order_1"]},
+                {"event_id": "e3", "activity": "b", "timestamp": pd.Timestamp("2024-01-01T00:02:00"), "event_objects": ["item_1", "order_1"]},
+                {"event_id": "e4", "activity": "end", "timestamp": pd.Timestamp("2024-01-01T00:03:00"), "event_objects": ["item_1"]},
+            ],
+        )
+        layer_one_ocel = unittest.mock.Mock()
+        layer_one_ocel.events = pd.DataFrame({"ocel:activity": ["a", "b"]})
+        layer_two_ocel = unittest.mock.Mock()
+        layer_two_ocel.events = pd.DataFrame({"ocel:activity": ["start", "a", "b", "end"]})
+        subprocess_component = {
+            "id": "subprocess_1",
+            "transitions": [
+                {"kind": "activity", "label": "a"},
+                {"kind": "activity", "label": "b"},
+            ],
+        }
+
+        def build_layer_ocel_side_effect(_, __, ___, selected_object_types, ____):
+            if set(selected_object_types) == {"order"}:
+                return layer_one_ocel, [], ["a", "b"]
+            return layer_two_ocel, [], ["a", "b", "end", "start"]
+
+        def discover_with_components_side_effect(layer_ocel, *_):
+            if layer_ocel is layer_one_ocel:
+                return {"activities": ["a", "b"], "petri_nets": {}}, []
+            if layer_ocel is layer_two_ocel:
+                return {"activities": ["a", "b", "end", "start"], "petri_nets": {}}, [subprocess_component]
+            raise AssertionError("Unexpected layer OCEL")
+
+        with patch(
+            "repo.discovery.discovery_preparation._build_layer_ocel",
+            side_effect=build_layer_ocel_side_effect,
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_ocpn_with_subprocess_components",
+            side_effect=discover_with_components_side_effect,
+        ), patch(
+            "repo.discovery.discovery_preparation._build_pruning_candidates",
+            side_effect=[[], [{"kind": "subprocess", "activities": ("a", "b")}]],
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_activity_resources",
+            return_value={},
+        ), patch(
+            "repo.discovery.discovery_preparation._select_best_pruning_candidate",
+            side_effect=AssertionError("Metric-based pruning should be bypassed"),
+        ):
+            _, discovered_models = discover_models_for_hierarchy(
+                ocel,
+                {"order": 1, "item": 2},
+            )
+
+        self.assertEqual(discovered_models[2]["activities"], ["a", "b", "end", "start"])
+
+    def test_layer_discovery_keeps_boundary_activities_attached_to_subprocess_candidates(self):
+        ocel = _FakeInputOCEL(
+            {
+                "item_1": "item",
+                "order_1": "order",
+            },
+            [
+                {"event_id": "e1", "activity": "review", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
+                {"event_id": "e2", "activity": "pre", "timestamp": pd.Timestamp("2024-01-01T00:01:00"), "event_objects": ["item_1", "order_1"]},
+                {"event_id": "e3", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:02:00"), "event_objects": ["item_1", "order_1"]},
+                {"event_id": "e4", "activity": "b", "timestamp": pd.Timestamp("2024-01-01T00:03:00"), "event_objects": ["item_1", "order_1"]},
+                {"event_id": "e5", "activity": "post", "timestamp": pd.Timestamp("2024-01-01T00:04:00"), "event_objects": ["item_1", "order_1"]},
+                {"event_id": "e6", "activity": "x", "timestamp": pd.Timestamp("2024-01-01T00:05:00"), "event_objects": ["item_1", "order_1"]},
+            ],
+        )
+        layer_one_ocel = unittest.mock.Mock()
+        layer_one_ocel.events = pd.DataFrame({"ocel:activity": ["pre", "a", "b", "post", "x"]})
+        layer_two_first_ocel = unittest.mock.Mock()
+        layer_two_first_ocel.events = pd.DataFrame({"ocel:activity": ["review", "pre", "a", "b", "post", "x"]})
+        layer_two_second_ocel = unittest.mock.Mock()
+        layer_two_second_ocel.events = pd.DataFrame({"ocel:activity": ["review", "pre", "a", "b", "post"]})
+        subprocess_component = {
+            "id": "subprocess_1",
+            "transitions": [
+                {"kind": "activity", "label": "a"},
+                {"kind": "activity", "label": "b"},
+            ],
+        }
+        build_layer_calls = []
+
+        def build_layer_ocel_side_effect(_, __, ___, selected_object_types, selected_activities):
+            build_layer_calls.append((set(selected_object_types), set(selected_activities)))
+            if set(selected_object_types) == {"order"}:
+                return layer_one_ocel, [], ["a", "b", "post", "pre", "x"]
+            if len(build_layer_calls) == 2:
+                return layer_two_first_ocel, [], ["a", "b", "post", "pre", "review", "x"]
+            return layer_two_second_ocel, [], ["a", "b", "post", "pre", "review"]
+
+        def discover_with_components_side_effect(layer_ocel, *_):
+            if layer_ocel is layer_one_ocel:
+                return {"activities": ["a", "b", "post", "pre", "x"], "petri_nets": {}}, []
+            if layer_ocel is layer_two_first_ocel:
+                return {"activities": ["a", "b", "post", "pre", "review", "x"], "petri_nets": {}}, [subprocess_component]
+            if layer_ocel is layer_two_second_ocel:
+                return {"activities": ["a", "b", "post", "pre", "review"], "petri_nets": {}}, [subprocess_component]
+            raise AssertionError("Unexpected layer OCEL")
+
+        with patch(
+            "repo.discovery.discovery_preparation._build_layer_ocel",
+            side_effect=build_layer_ocel_side_effect,
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_ocpn_with_subprocess_components",
+            side_effect=discover_with_components_side_effect,
+        ), patch(
+            "repo.discovery.discovery_preparation._build_pruning_candidates",
+            side_effect=[
+                [],
+                [{"kind": "subprocess", "activities": ("pre", "a", "b", "post")}],
+                [{"kind": "subprocess", "activities": ("pre", "a", "b", "post")}],
+            ],
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_activity_resources",
+            return_value={},
+        ):
+            _, discovered_models = discover_models_for_hierarchy(
+                ocel,
+                {"order": 1, "item": 2},
+            )
+
+        layer_two_model = discovered_models[2]
+
+        self.assertEqual(build_layer_calls[1][1], {"a", "b", "post", "pre", "review", "x"})
+        self.assertEqual(build_layer_calls[2][1], {"a", "b", "post", "pre", "review"})
+        self.assertEqual(layer_two_model["activities"], ["a", "b", "post", "pre", "review"])
+        self.assertNotIn("x", layer_two_model["activities"])
 
     def test_layer_discovery_reuses_last_iteration_components(self):
         ocel = _FakeInputOCEL(
@@ -1995,7 +2168,7 @@ class SubprocessDetectionTests(unittest.TestCase):
             return_value=[],
         ), patch(
             "repo.discovery.discovery_preparation._select_best_pruning_candidate",
-            return_value=(None, 0),
+            side_effect=AssertionError("Metric-based pruning should be bypassed"),
         ), patch(
             "repo.discovery.discovery_preparation.detect_subprocess_components",
             side_effect=AssertionError("Should reuse iteration components"),

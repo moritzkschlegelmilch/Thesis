@@ -921,11 +921,12 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None, show_progr
 
     for layer_index, layer in enumerate(layer_iter):
         selected_object_types = layer_to_object_types[layer]
-        lower_layer_ocel = None
         subprocess_components = []
-        if layer_index > 0:
-            lower_layer = discovered_layers[layer_index - 1]
-            lower_layer_ocel = discovered_models[lower_layer]["ocel"]
+        native_layer_activities = {
+            activity
+            for activity, activity_layer in activity_to_layer.items()
+            if activity_layer == layer
+        }
         active_activities = {
             activity
             for activity, activity_layer in activity_to_layer.items()
@@ -958,23 +959,22 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None, show_progr
                 layer,
             )
 
-            best_candidate, best_score = _select_best_pruning_candidate(
-                ocpn,
-                layer_ocel,
-                lower_layer_ocel,
-                candidates,
-                show_progress=show_progress,
-                progress_desc=f"Layer {layer} pruning",
-            )
-
-
-            if best_candidate is None or best_score <= 0:
+            # Temporary correctness mode:
+            # keep only native activities for this layer plus lower-layer
+            # activities that belong to detected subprocess candidates.
+            # Candidate activities already include any standalone
+            # boundary-adjacent activities attached in
+            # _build_pruning_candidates().
+            retained_subprocess_activities = {
+                activity
+                for candidate in candidates
+                if candidate.get("kind") == "subprocess"
+                for activity in candidate.get("activities", ())
+            }
+            next_active_activities = native_layer_activities | retained_subprocess_activities
+            if next_active_activities == active_activities:
                 break
-
-            remaining_activities = active_activities - set(best_candidate["activities"])
-            if remaining_activities == active_activities:
-                break
-            active_activities = remaining_activities
+            active_activities = next_active_activities
 
         activity_resources = _discover_activity_resources(
             included_event_records,
