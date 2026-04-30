@@ -1,4 +1,5 @@
 from collections import defaultdict
+from contextlib import contextmanager
 from numbers import Integral
 import sys
 
@@ -13,6 +14,29 @@ from .subprocess_detection import _component_boundary_places, collapse_sub_proce
 
 # Cache filtering contexts by OCEL object identity.
 _OCEL_FILTERING_CONTEXT_CACHE: dict[int, dict] = {}
+
+
+@contextmanager
+def _progress_step(description, *, enabled=False, progress_bar=None):
+    if progress_bar is not None:
+        progress_bar.set_postfix_str(description, refresh=False)
+
+    if not enabled:
+        yield
+        return
+
+    step_bar = tqdm(
+        total=1,
+        desc=description,
+        leave=False,
+        file=sys.stdout,
+        bar_format="{desc}: {bar} [{elapsed}]",
+    )
+    try:
+        yield
+        step_bar.update(1)
+    finally:
+        step_bar.close()
 
 
 def _ocel_event_id_column(ocel):
@@ -363,16 +387,35 @@ def _build_ocel_from_filtering_context(filtering_context):
     return layer_ocel
 
 
-def _discover_ocpn_with_subprocess_components(layer_ocel, activity_to_layer, reference_layer):
-    ocpn = _discover_ocpn(layer_ocel)
+def _discover_ocpn_with_subprocess_components(
+    layer_ocel,
+    activity_to_layer,
+    reference_layer,
+    show_progress=False,
+    progress_prefix=None,
+    progress_bar=None,
+):
+    prefix = progress_prefix or f"Layer {reference_layer}"
+
+    with _progress_step(
+        f"{prefix}: PM4Py OCPN discovery",
+        enabled=show_progress,
+        progress_bar=progress_bar,
+    ):
+        ocpn = _discover_ocpn(layer_ocel)
     if ocpn is None:
         return None, []
 
-    subprocess_components = detect_subprocess_components(
-        ocpn,
-        activity_to_layer,
-        reference_layer,
-    )
+    with _progress_step(
+        f"{prefix}: subprocess detection",
+        enabled=show_progress,
+        progress_bar=progress_bar,
+    ):
+        subprocess_components = detect_subprocess_components(
+            ocpn,
+            activity_to_layer,
+            reference_layer,
+        )
     return ocpn, subprocess_components
 
 
@@ -911,13 +954,15 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None, show_progr
 
     discovered_models = {}
     layer_iter = discovered_layers
+    layer_progress_bar = None
     if show_progress:
-        layer_iter = tqdm(
+        layer_progress_bar = tqdm(
             discovered_layers,
             total=len(discovered_layers),
             desc="Discovering models",
             file=sys.stdout,
         )
+        layer_iter = layer_progress_bar
 
     for layer_index, layer in enumerate(layer_iter):
         selected_object_types = layer_to_object_types[layer]
@@ -936,28 +981,42 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None, show_progr
         i = 0
         while True:
             i += 1
+            progress_prefix = f"Layer {layer} iteration {i}"
 
-            layer_ocel, included_event_records, included_activities = _build_layer_ocel(
-                ocel,
-                event_records,
-                object_to_type,
-                selected_object_types,
-                active_activities,
-            )
+            with _progress_step(
+                f"{progress_prefix}: building layer log",
+                enabled=show_progress,
+                progress_bar=layer_progress_bar,
+            ):
+                layer_ocel, included_event_records, included_activities = _build_layer_ocel(
+                    ocel,
+                    event_records,
+                    object_to_type,
+                    selected_object_types,
+                    active_activities,
+                )
 
             ocpn, iteration_components = _discover_ocpn_with_subprocess_components(
                 layer_ocel,
                 activity_to_layer,
                 layer,
+                show_progress,
+                progress_prefix,
+                layer_progress_bar,
             )
             subprocess_components = iteration_components
 
-            candidates = _build_pruning_candidates(
-                iteration_components,
-                included_activities,
-                activity_to_layer,
-                layer,
-            )
+            with _progress_step(
+                f"{progress_prefix}: building pruning candidates",
+                enabled=show_progress,
+                progress_bar=layer_progress_bar,
+            ):
+                candidates = _build_pruning_candidates(
+                    iteration_components,
+                    included_activities,
+                    activity_to_layer,
+                    layer,
+                )
 
             # Temporary correctness mode:
             # keep only native activities for this layer plus lower-layer
@@ -965,23 +1024,33 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None, show_progr
             # Candidate activities already include any standalone
             # boundary-adjacent activities attached in
             # _build_pruning_candidates().
-            retained_subprocess_activities = {
-                activity
-                for candidate in candidates
-                if candidate.get("kind") == "subprocess"
-                for activity in candidate.get("activities", ())
-            }
+            with _progress_step(
+                f"{progress_prefix}: retaining subprocess activities",
+                enabled=show_progress,
+                progress_bar=layer_progress_bar,
+            ):
+                retained_subprocess_activities = {
+                    activity
+                    for candidate in candidates
+                    if candidate.get("kind") == "subprocess"
+                    for activity in candidate.get("activities", ())
+                }
             next_active_activities = native_layer_activities | retained_subprocess_activities
             if next_active_activities == active_activities:
                 break
             active_activities = next_active_activities
 
-        activity_resources = _discover_activity_resources(
-            included_event_records,
-            object_to_type,
-            solution,
-            layer,
-        )
+        with _progress_step(
+            f"Layer {layer}: deriving activity resources",
+            enabled=show_progress,
+            progress_bar=layer_progress_bar,
+        ):
+            activity_resources = _discover_activity_resources(
+                included_event_records,
+                object_to_type,
+                solution,
+                layer,
+            )
         highlighted_activities = sorted(
             activity
             for activity in included_activities
@@ -1000,5 +1069,8 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None, show_progr
             "ocpn": ocpn,
             "subprocess_components": subprocess_components,
         }
+
+        if layer_progress_bar is not None:
+            layer_progress_bar.set_postfix_str(f"Layer {layer}: completed", refresh=False)
 
     return dict(activity_to_layer), discovered_models

@@ -1,3 +1,5 @@
+from contextlib import redirect_stdout
+from io import StringIO
 import os
 import unittest
 from unittest.mock import patch
@@ -2180,6 +2182,49 @@ class SubprocessDetectionTests(unittest.TestCase):
 
         self.assertEqual(discovered_models[1]["subprocess_components"], expected_components)
         discover_patch.assert_called_once()
+
+    def test_layer_discovery_progress_mentions_pm4py_and_subprocess_detection(self):
+        ocel = _FakeInputOCEL(
+            {"item_1": "item"},
+            [
+                {"event_id": "e1", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
+            ],
+        )
+        fake_layer_ocel = unittest.mock.Mock()
+        fake_layer_ocel.events = pd.DataFrame({"ocel:activity": ["a"]})
+        fake_layer_ocel.relations = pd.DataFrame({"ocel:eid": ["e1"]})
+        fake_ocpn = {"activities": ["a"], "petri_nets": {}}
+
+        buffer = StringIO()
+        with patch(
+            "repo.discovery.discovery_preparation._build_layer_ocel",
+            return_value=(
+                fake_layer_ocel,
+                [("e1", "a", pd.Timestamp("2024-01-01T00:00:00"), ("item_1",))],
+                ["a"],
+            ),
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_ocpn",
+            return_value=fake_ocpn,
+        ), patch(
+            "repo.discovery.discovery_preparation.detect_subprocess_components",
+            return_value=[],
+        ), patch(
+            "repo.discovery.discovery_preparation._build_pruning_candidates",
+            return_value=[],
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_activity_resources",
+            return_value={},
+        ), redirect_stdout(buffer):
+            discover_models_for_hierarchy(
+                ocel,
+                {"item": 1},
+                show_progress=True,
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("PM4Py OCPN discovery", output)
+        self.assertIn("subprocess detection", output)
 
 
 if __name__ == "__main__":
