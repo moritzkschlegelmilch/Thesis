@@ -1,10 +1,12 @@
 from collections import defaultdict
 from numbers import Integral
+import sys
 
 import pandas as pd
 import pm4py
 from pm4py.objects.ocel.obj import OCEL
 from pm4py.objects.petri_net.obj import PetriNet
+from tqdm import tqdm
 
 from .totem import _prepare_totem_data, get_all_event_objects
 from .subprocess_detection import _component_boundary_places, collapse_sub_processes, detect_subprocess_components
@@ -362,20 +364,15 @@ def _build_ocel_from_filtering_context(filtering_context):
 
 
 def _discover_ocpn_with_subprocess_components(layer_ocel, activity_to_layer, reference_layer):
-    print('discover ocpn')
     ocpn = _discover_ocpn(layer_ocel)
     if ocpn is None:
         return None, []
-    print('end discover ocpn')
 
-    #pm4py.view_ocpn(ocpn, format="png", bgcolor="white")
-    print('start detecting subprocesses')
     subprocess_components = detect_subprocess_components(
         ocpn,
         activity_to_layer,
         reference_layer,
     )
-    print('end detecting subprocesses')
     return ocpn, subprocess_components
 
 
@@ -647,7 +644,6 @@ def _compute_information_loss_from_prepared_context(prepared_context):
     edge_only_ocpn = prepared_context["edge_only_ocpn"]
     component_and_edge_ocel = prepared_context["component_and_edge_ocel"]
 
-    print('start precision')
     precision_with_component = 0.0
     if component_and_edge_ocpn is not None and component_and_edge_ocel is not None:
         precision_with_component = float(
@@ -665,7 +661,6 @@ def _compute_information_loss_from_prepared_context(prepared_context):
                 component_and_edge_ocel,
             ).precision()
         )
-    print('end precision')
 
     information_loss = 1 - (precision_without_component / precision_with_component)
 
@@ -797,7 +792,6 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
 
     precision_with_component = 0.0
     if component_and_edge_ocpn is not None and component_and_edge_ocel is not None:
-        print('start computing precision')
         precision_with_component = float(
             NetQuality(
                 component_and_edge_ocpn,
@@ -805,11 +799,9 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
                 max_nodes_per_replay=100,
             ).precision()
         )
-        print('end computing precision')
 
     precision_without_component = 0.0
     if edge_only_ocpn is not None and component_and_edge_ocel is not None:
-        print('start computing precision')
         precision_without_component = float(
             NetQuality(
                 edge_only_ocpn,
@@ -817,7 +809,6 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
                 max_nodes_per_replay=10,
             ).precision()
         )
-        print('end computing precision')
 
     candidate_label = candidate.get("id") or ",".join(component_activities)
     safe_candidate_label = "".join(
@@ -850,29 +841,29 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
     # )
 
     #print(f"Pruning candidate debug image: {output_path}")
-    print(
-        "With component | "
-        f"complexity={complexity_with_component:.4f} "
-        f"precision={precision_with_component:.4f}"
-    )
-    print(
-        "Without component | "
-        f"complexity={complexity_without_component:.4f} "
-        f"precision={precision_without_component:.4f}"
-    )
-    print(
-        f"Simplicity gain={simplicity_gain:.4f} "
-        f"Precision loss={information_loss:.4f} "
-        f"Score={(simplicity_gain - information_loss):.4f}"
-    )
-
-
-def _select_best_pruning_candidate(current_model, current_ocel, lower_layer_ocel, candidates):
+def _select_best_pruning_candidate(
+    current_model,
+    current_ocel,
+    lower_layer_ocel,
+    candidates,
+    *,
+    show_progress=False,
+    progress_desc="Evaluating pruning candidates",
+):
     best_candidate = None
     best_score = float("-inf")
 
-    for candidate in candidates:
-        print('start calculating cadidate')
+    candidate_iter = candidates
+    if show_progress:
+        candidate_iter = tqdm(
+            candidates,
+            total=len(candidates),
+            desc=progress_desc,
+            leave=False,
+            file=sys.stdout,
+        )
+
+    for candidate in candidate_iter:
         component_activities = tuple(candidate.get("activities", ()))
         prepared_context = None
         if current_model is not None and current_ocel is not None and component_activities:
@@ -884,12 +875,15 @@ def _select_best_pruning_candidate(current_model, current_ocel, lower_layer_ocel
                 build_component_and_edge_ocel=True,
             )
         simplicity_gain = _compute_simplicity_gain_from_prepared_context(prepared_context, candidate)
-
-        print('start precision loss')
         information_loss = _compute_information_loss_from_prepared_context(prepared_context)
-        print('end precision loss')
-        print('end calculating cadidate')
         score = simplicity_gain - information_loss
+
+        if show_progress:
+            candidate_label = candidate.get("id") or ",".join(component_activities)
+            candidate_iter.set_postfix_str(
+                f"best={best_score:.3f} current={score:.3f} candidate={candidate_label}",
+                refresh=False,
+            )
 
         if score > best_score:
             best_candidate = candidate
@@ -898,7 +892,7 @@ def _select_best_pruning_candidate(current_model, current_ocel, lower_layer_ocel
     return best_candidate, best_score
 
 
-def discover_models_for_hierarchy(ocel, solution, layer_context=None):
+def discover_models_for_hierarchy(ocel, solution, layer_context=None, show_progress=False):
     object_to_type, event_records = _extract_ocel_filtering_context(ocel)
     activity_to_layer = {}
     layer_to_object_types = defaultdict(set)
@@ -916,7 +910,16 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
     layer_context_by_layer = _normalize_layer_context(discovered_layers, layer_context)
 
     discovered_models = {}
-    for layer_index, layer in enumerate(discovered_layers):
+    layer_iter = discovered_layers
+    if show_progress:
+        layer_iter = tqdm(
+            discovered_layers,
+            total=len(discovered_layers),
+            desc="Discovering models",
+            file=sys.stdout,
+        )
+
+    for layer_index, layer in enumerate(layer_iter):
         selected_object_types = layer_to_object_types[layer]
         lower_layer_ocel = None
         subprocess_components = []
@@ -941,8 +944,6 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
                 active_activities,
             )
 
-            print('discovering layer', layer)
-
             ocpn, iteration_components = _discover_ocpn_with_subprocess_components(
                 layer_ocel,
                 activity_to_layer,
@@ -950,20 +951,20 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None):
             )
             subprocess_components = iteration_components
 
-            print('build candidates')
             candidates = _build_pruning_candidates(
                 iteration_components,
                 included_activities,
                 activity_to_layer,
                 layer,
             )
-            print('end building candidates')
 
             best_candidate, best_score = _select_best_pruning_candidate(
                 ocpn,
                 layer_ocel,
                 lower_layer_ocel,
                 candidates,
+                show_progress=show_progress,
+                progress_desc=f"Layer {layer} pruning",
             )
 
 

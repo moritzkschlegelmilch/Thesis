@@ -1,10 +1,12 @@
 from abc import ABC
 from math import sqrt
+import sys
 
 from .Scorable import Scorable
 from .ilp import solve
 from .discovery_preparation import discover_models_for_hierarchy
 from ..helpers.vorbose import visualize_hierarchy_with_models, visualize_layers_boxed
+from tqdm import tqdm
 
 
 class ProcessAreaDiscoveryFramework(ABC):
@@ -22,16 +24,37 @@ class ProcessAreaDiscoveryFramework(ABC):
         for scorable in self.scorables:
             self.overall_weight += scorable.eps
 
-    def prepare(self):
-        for scorable in self.scorables:
+    def prepare(self, show_progress=False):
+        scorables = self.scorables
+        if show_progress:
+            scorables = tqdm(
+                self.scorables,
+                total=len(self.scorables),
+                desc="Preparing scorers",
+                file=sys.stdout,
+            )
+
+        for scorable in scorables:
             scorable.prepare(self.ocel)
 
-    def assign_scores(self):
-        for o_1 in self.ocel.object_types:
-            for o_2 in self.ocel.object_types:
+    def assign_scores(self, show_progress=False):
+        object_types = tuple(self.ocel.object_types)
+        total_pairs = len(object_types) * len(object_types)
+        progress_bar = None
+        if show_progress:
+            progress_bar = tqdm(
+                total=total_pairs,
+                desc="Assigning scores",
+                file=sys.stdout,
+            )
+
+        for o_1 in object_types:
+            for o_2 in object_types:
                 if o_1 == o_2:
                     self.scores_pull[o_1, o_2] = 0
                     self.scores_push[o_1, o_2] = 0
+                    if progress_bar is not None:
+                        progress_bar.update(1)
                     continue
 
                 score_push: float = 0
@@ -43,6 +66,12 @@ class ProcessAreaDiscoveryFramework(ABC):
 
                 self.scores_pull[o_1, o_2] = score_pull / self.overall_weight
                 self.scores_push[o_1, o_2] = score_push / self.overall_weight
+
+                if progress_bar is not None:
+                    progress_bar.update(1)
+
+        if progress_bar is not None:
+            progress_bar.close()
 
     def solve_ilp(self):
         self.solution = solve(self.ocel.object_types, self.scores_push, self.scores_pull)
@@ -59,14 +88,20 @@ class ProcessAreaDiscoveryFramework(ABC):
             output_path=output_path,
         )
 
-    def discover_models(self, layer_context=None):
+    def discover_models(self, layer_context=None, show_progress=False):
         self.activity_to_layer, self.discovered_models = discover_models_for_hierarchy(
             self.ocel,
             self.solution,
             layer_context=layer_context,
+            show_progress=show_progress,
         )
 
-    def get_layers(self):
-        self.prepare()
-        self.assign_scores()
+    def get_layers(self, show_progress=False):
+        self.prepare(show_progress=show_progress)
+        self.assign_scores(show_progress=show_progress)
         return self.solve_ilp()
+
+    def run(self, layer_context=None, show_progress=False):
+        self.get_layers(show_progress=show_progress)
+        self.discover_models(layer_context=layer_context, show_progress=show_progress)
+        return self.solution, self.discovered_models

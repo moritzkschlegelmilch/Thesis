@@ -3,10 +3,12 @@ from __future__ import annotations
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from itertools import product
+import sys
 from typing import Any
 
 from pm4py.objects.ocel.obj import OCEL
 from pm4py.objects.petri_net.obj import PetriNet
+from tqdm import tqdm
 
 
 Token = tuple[str, Any]
@@ -87,11 +89,11 @@ class NetQuality:
     # -------------------------
     # PUBLIC API
     # -------------------------
-    def precision(self, ocel=None):
-        return self._evaluate(ocel).precision
+    def precision(self, ocel=None, *, show_progress=False):
+        return self._evaluate(ocel, show_progress=show_progress).precision
 
-    def fitness(self, ocel=None):
-        return self._evaluate(ocel).fitness
+    def fitness(self, ocel=None, *, show_progress=False):
+        return self._evaluate(ocel, show_progress=show_progress).fitness
 
     def complexity(self, alpha: float = 2, beta: float = 2) -> float:
         mc = self._ensure_model_cache()
@@ -248,13 +250,22 @@ class NetQuality:
     # -------------------------
     # EVALUATION
     # -------------------------
-    def _evaluate(self, ocel):
+    def _evaluate(self, ocel, show_progress=False):
         ocel = ocel or self.ocel
-        prepared = self._prepare_log(ocel)
+        prepared = self._prepare_log(ocel, show_progress=show_progress)
 
         model_enabled = {}
 
-        for ctx, events in prepared["replay"].items():
+        replay_iter = prepared["replay"].items()
+        if show_progress:
+            replay_iter = tqdm(
+                replay_iter,
+                total=len(prepared["replay"]),
+                desc="Replaying contexts",
+                file=sys.stdout,
+            )
+
+        for ctx, events in replay_iter:
             enabled = set()
 
             for ev in events:
@@ -265,7 +276,16 @@ class NetQuality:
         precision_terms = []
         fitness_terms = []
 
-        for e in prepared["events"]:
+        event_iter = prepared["events"]
+        if show_progress:
+            event_iter = tqdm(
+                prepared["events"],
+                total=len(prepared["events"]),
+                desc="Aggregating scores",
+                file=sys.stdout,
+            )
+
+        for e in event_iter:
             ctx = prepared["ctx"][e]
             log = prepared["log"][ctx]
             model = model_enabled[ctx]
@@ -279,7 +299,7 @@ class NetQuality:
             precision_terms.append(len(overlap) / len(model))
             fitness_terms.append(len(overlap) / len(log))
 
-        return _EvaluationResult(
+        result = _EvaluationResult(
             precision=sum(precision_terms) / len(precision_terms)
             if precision_terms
             else 0,
@@ -287,6 +307,9 @@ class NetQuality:
             if fitness_terms
             else 0,
         )
+        if show_progress:
+            print("Done.")
+        return result
 
     # -------------------------
     # BOUNDED COUNT-BASED REPLAY
@@ -517,7 +540,7 @@ class NetQuality:
     # -------------------------
     # LOG PREPARATION
     # -------------------------
-    def _prepare_log(self, ocel):
+    def _prepare_log(self, ocel, show_progress=False):
         if ocel is None:
             raise ValueError("No OCEL was provided.")
 
@@ -567,7 +590,16 @@ class NetQuality:
         # Recent history per concrete object.
         seen_by_object = defaultdict(lambda: deque(maxlen=self._history_window))
 
-        for e in ordered:
+        ordered_iter = ordered
+        if show_progress:
+            ordered_iter = tqdm(
+                ordered,
+                total=len(ordered),
+                desc="Preparing event contexts",
+                file=sys.stdout,
+            )
+
+        for e in ordered_iter:
             current_tokens = event_tokens.get(e, ())
             current_objects_by_type = objects_by_type_for_event(e)
 

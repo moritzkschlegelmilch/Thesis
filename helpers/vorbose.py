@@ -1,8 +1,10 @@
 from collections import defaultdict
 from io import BytesIO
+import os
 from pathlib import Path
 import colorsys
 import html
+import sys
 import textwrap
 
 import matplotlib
@@ -58,9 +60,35 @@ def print_tuple_dict_matrices(push, pull, decimals=4):
 
     return m1, m2
 
-
-matplotlib.use("TkAgg")
+if "MPLBACKEND" in os.environ:
+    matplotlib.use(os.environ["MPLBACKEND"])
+elif sys.platform == "darwin":
+    matplotlib.use("TkAgg")
+elif os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+    matplotlib.use("TkAgg")
+else:
+    matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+
+def _matplotlib_backend_is_interactive():
+    backend = matplotlib.get_backend().lower()
+    non_interactive_backends = {
+        "agg",
+        "cairo",
+        "pdf",
+        "pgf",
+        "ps",
+        "svg",
+        "template",
+        "module://matplotlib_inline.backend_inline",
+    }
+    return backend not in non_interactive_backends
+
+
+def _show_current_figure():
+    if _matplotlib_backend_is_interactive():
+        plt.show()
 
 
 def visualize_layers_boxed(solution, title="Hierarchy Layers", output_path=None):
@@ -104,7 +132,7 @@ def visualize_layers_boxed(solution, title="Hierarchy Layers", output_path=None)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fig.savefig(output_path, dpi=200, bbox_inches="tight")
     else:
-        plt.show()
+        _show_current_figure()
 
     plt.close(fig)
 
@@ -792,7 +820,7 @@ def render_pruning_candidate_debug(
         plt.imshow(result)
         plt.axis("off")
         plt.tight_layout()
-        plt.show()
+        _show_current_figure()
         plt.close()
     return result
 
@@ -1075,7 +1103,7 @@ def visualize_hierarchy_with_models(
         plt.imshow(result)
         plt.axis("off")
         plt.tight_layout()
-        plt.show()
+        _show_current_figure()
         plt.close()
 
     return result
