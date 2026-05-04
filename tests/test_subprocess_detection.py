@@ -19,6 +19,7 @@ from repo.discovery.component_deletion_impact import (
     discover_component_and_edge_ocpns,
 )
 from repo.discovery.discovery_preparation import (
+    _build_precision_reference_bundle,
     _build_ocel_filtering_context,
     _build_pruning_candidates,
     _compute_information_loss,
@@ -756,259 +757,465 @@ class SubprocessDetectionTests(unittest.TestCase):
             (("a",), ("b",)),
         )
 
-    def test_compute_information_loss_uses_precision_ratio(self):
-        fake_ocel = _FakeInputOCEL(
-            {"item_1": "item"},
-            [
-                {"event_id": "e1", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
-            ],
-        )
-        with_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
-        without_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
-        qualities = {}
-
-        def net_quality_side_effect(ocpn, ocel):
-            self.assertIs(ocel, fake_ocel)
-            quality = unittest.mock.Mock()
-            qualities[id(ocpn)] = quality
-            if ocpn is with_ocpn:
-                quality.precision.return_value = 0.8
-                return quality
-            if ocpn is without_ocpn:
-                quality.precision.return_value = 0.4
-                return quality
-            raise AssertionError("Unexpected OCPN")
+    def test_compute_information_loss_delegates_to_prepared_context(self):
+        prepared_context = {"prepared": True}
 
         with patch(
-            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
-            return_value=(fake_ocel, fake_ocel, with_ocpn, without_ocpn),
-        ), patch(
-            "repo.discovery.net_quality.NetQuality",
-            side_effect=net_quality_side_effect,
-        ):
+            "repo.discovery.discovery_preparation._prepare_pruning_candidate_context",
+            return_value=prepared_context,
+        ) as prepare_patch, patch(
+            "repo.discovery.discovery_preparation._compute_information_loss_from_prepared_context",
+            return_value=0.25,
+        ) as compute_patch:
             information_loss = _compute_information_loss(
                 current_model=object(),
-                current_ocel=fake_ocel,
-                lower_layer_ocel=None,
-                component={"activities": ("a", "b")},
-            )
-
-        self.assertEqual(information_loss, 0.5)
-        self.assertEqual(
-            qualities[id(with_ocpn)].precision.call_args_list,
-            [unittest.mock.call()],
-        )
-        self.assertEqual(
-            qualities[id(without_ocpn)].precision.call_args_list,
-            [unittest.mock.call()],
-        )
-
-    def test_compute_simplicity_gain_uses_complexity_ratio(self):
-        with_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
-        without_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
-
-        def net_quality_side_effect(ocpn, ocel=None):
-            quality = unittest.mock.Mock()
-            if ocpn is with_ocpn:
-                quality.complexity.return_value = 12.0
-                return quality
-            if ocpn is without_ocpn:
-                quality.complexity.return_value = 3.0
-                return quality
-            raise AssertionError("Unexpected OCPN")
-
-        with patch(
-            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
-            return_value=(None, None, with_ocpn, without_ocpn),
-        ), patch(
-            "repo.discovery.net_quality.NetQuality",
-            side_effect=net_quality_side_effect,
-        ):
-            simplicity_gain = _compute_simplicity_gain(
-                current_model=object(),
                 current_ocel=object(),
                 lower_layer_ocel=None,
                 component={"activities": ("a", "b")},
             )
 
-        self.assertEqual(simplicity_gain, 0.75)
+        self.assertAlmostEqual(information_loss, 0.25)
+        prepare_patch.assert_called_once_with(
+            unittest.mock.ANY,
+            unittest.mock.ANY,
+            None,
+            ("a", "b"),
+            build_component_and_edge_ocel=True,
+        )
+        compute_patch.assert_called_once_with(prepared_context)
 
-    def test_compute_simplicity_gain_collapses_subprocess_before_measuring_with_component(self):
-        with_ocpn = {
-            "activities": ["a", "b", "x"],
-            "petri_nets": {"item": (object(), object(), object())},
+    def test_compute_information_loss_uses_fixed_precision_bundle(self):
+        precision_bundle = {
+            "baseline_enabled_mass": 5.0,
+            "context_weights": {
+                "ctx_a": 2,
+                "ctx_b": 1,
+            },
+            "original_enabled_by_context": {
+                "ctx_a": frozenset({"a", "b"}),
+                "ctx_b": frozenset({"a"}),
+            },
+            "reduced_log_enabled_by_context": {
+                "ctx_a": frozenset(),
+                "ctx_b": frozenset({"y"}),
+            },
         }
-        collapsed_with_ocpn = {
-            "activities": ["subprocess_1", "x"],
-            "petri_nets": {"item": (object(), object(), object())},
-        }
-        without_ocpn = {
-            "activities": ["x"],
-            "petri_nets": {"item": (object(), object(), object())},
-        }
-
-        local_subprocess_component = {
-            "id": "subprocess_1",
-            "transition_keys": (("activity", "a"), ("activity", "b")),
-            "place_keys": (),
-            "arc_keys": (),
-            "transitions": [
-                {"kind": "activity", "label": "a"},
-                {"kind": "activity", "label": "b"},
-            ],
-        }
-
-        def net_quality_side_effect(ocpn, ocel=None):
-            quality = unittest.mock.Mock()
-            if ocpn is collapsed_with_ocpn:
-                quality.complexity.return_value = 8.0
-                return quality
-            if ocpn is without_ocpn:
-                quality.complexity.return_value = 2.0
-                return quality
-            raise AssertionError("Unexpected OCPN")
 
         with patch(
-            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
-            return_value=(None, None, with_ocpn, without_ocpn),
-        ), patch(
-            "repo.discovery.discovery_preparation.detect_subprocess_components",
-            return_value=[local_subprocess_component],
-        ) as detect_patch, patch(
-            "repo.discovery.discovery_preparation.collapse_sub_processes",
-            return_value=(collapsed_with_ocpn, frozenset()),
-        ) as collapse_patch, patch(
-            "repo.discovery.net_quality.NetQuality",
-            side_effect=net_quality_side_effect,
-        ):
-            simplicity_gain = _compute_simplicity_gain(
-                current_model=object(),
-                current_ocel=object(),
+            "repo.discovery.discovery_preparation._virtual_reduction_enabled_labels_by_context",
+            return_value={
+                "ctx_a": frozenset({"b", "x"}),
+                "ctx_b": frozenset({"y"}),
+            },
+        ) as reduced_patch:
+            information_loss = _compute_information_loss(
+                current_model=None,
+                current_ocel=None,
                 lower_layer_ocel=None,
-                component={
-                    "kind": "subprocess",
-                    "activities": ("a", "b"),
-                    "component": {"id": "subprocess_1"},
-                },
+                component={"activities": ("x", "y")},
+                precision_bundle=precision_bundle,
             )
 
-        detect_patch.assert_called_once_with(
-            with_ocpn,
-            {"a": 1, "b": 1, "x": 2},
-            reference_layer=2,
+        self.assertAlmostEqual(information_loss, 0.4)
+        reduced_patch.assert_called_once_with(
+            precision_bundle,
+            frozenset({"x", "y"}),
         )
-        collapse_patch.assert_called_once_with(with_ocpn, [local_subprocess_component])
-        self.assertEqual(simplicity_gain, 0.75)
 
-    def test_compute_simplicity_gain_collapses_all_grouped_subprocesses(self):
-        with_ocpn = {
-            "activities": ["a", "x", "b"],
-            "petri_nets": {"item": (object(), object(), object())},
-        }
-        collapsed_with_ocpn = {
-            "activities": ["subprocess_1", "x", "subprocess_2"],
-            "petri_nets": {"item": (object(), object(), object())},
-        }
-        without_ocpn = {
-            "activities": ["x"],
-            "petri_nets": {"item": (object(), object(), object())},
-        }
-        first_component = {
-            "id": "subprocess_1",
-            "transition_keys": (("activity", "a"),),
-            "place_keys": (),
-            "arc_keys": (),
-            "transitions": [{"kind": "activity", "label": "a"}],
-        }
-        second_component = {
-            "id": "subprocess_2",
-            "transition_keys": (("activity", "b"),),
-            "place_keys": (),
-            "arc_keys": (),
-            "transitions": [{"kind": "activity", "label": "b"}],
-        }
-
-        def net_quality_side_effect(ocpn, ocel=None):
-            quality = unittest.mock.Mock()
-            if ocpn is collapsed_with_ocpn:
-                quality.complexity.return_value = 10.0
-                return quality
-            if ocpn is without_ocpn:
-                quality.complexity.return_value = 4.0
-                return quality
-            raise AssertionError("Unexpected OCPN")
-
-        with patch(
-            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
-            return_value=(None, None, with_ocpn, without_ocpn),
-        ), patch(
-            "repo.discovery.discovery_preparation.detect_subprocess_components",
-            return_value=[first_component, second_component],
-        ) as detect_patch, patch(
-            "repo.discovery.discovery_preparation.collapse_sub_processes",
-            return_value=(collapsed_with_ocpn, frozenset()),
-        ) as collapse_patch, patch(
-            "repo.discovery.net_quality.NetQuality",
-            side_effect=net_quality_side_effect,
-        ):
-            simplicity_gain = _compute_simplicity_gain(
-                current_model=object(),
-                current_ocel=object(),
-                lower_layer_ocel=None,
-                component={
-                    "kind": "subprocess",
-                    "activities": ("a", "x", "b"),
-                    "subprocess_activity_groups": (("a",), ("b",)),
-                },
-            )
-
-        detect_patch.assert_called_once_with(
-            with_ocpn,
-            {"a": 1, "x": 2, "b": 1},
-            reference_layer=2,
-        )
-        collapse_patch.assert_called_once_with(with_ocpn, [first_component, second_component])
-        self.assertEqual(simplicity_gain, 0.6)
-
-    def test_select_best_pruning_candidate_reuses_component_edge_discovery_for_metrics(self):
-        fake_ocel = _FakeInputOCEL(
-            {"item_1": "item"},
-            [
-                {"event_id": "e1", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
+    def test_build_precision_reference_bundle_projects_model_to_two_layers(self):
+        previous_net = _build_net(
+            "order",
+            places=["a_in", "a_out", "b_in", "b_out"],
+            transitions={
+                "a_t": "a",
+                "b_t": "b",
+            },
+            arcs=[
+                ("a_in", "a_t"),
+                ("a_t", "a_out"),
+                ("b_in", "b_t"),
+                ("b_t", "b_out"),
             ],
         )
-        with_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
-        without_ocpn = {"petri_nets": {"item": (object(), object(), object())}}
+        current_net = _build_net(
+            "item",
+            places=["c_in", "c_out"],
+            transitions={
+                "c_t": "c",
+            },
+            arcs=[
+                ("c_in", "c_t"),
+                ("c_t", "c_out"),
+            ],
+        )
+        previous_ocpn = _build_ocpn({"order": previous_net})
+        current_ocpn = _build_ocpn({"item": current_net})
+        previous_ocpn["petri_nets"]["order"] = (
+            previous_net,
+            Marking({
+                _node_by_name(previous_net.places, "a_in"): 1,
+                _node_by_name(previous_net.places, "b_in"): 1,
+            }),
+            Marking({
+                _node_by_name(previous_net.places, "a_out"): 1,
+                _node_by_name(previous_net.places, "b_out"): 1,
+            }),
+        )
+        current_ocpn["petri_nets"]["item"] = (
+            current_net,
+            Marking({_node_by_name(current_net.places, "c_in"): 1}),
+            Marking({_node_by_name(current_net.places, "c_out"): 1}),
+        )
 
-        def net_quality_side_effect(ocpn, ocel=None, **kwargs):
-            quality = unittest.mock.Mock()
-            if ocpn is with_ocpn:
-                quality.complexity.return_value = 12.0
-                quality.precision.return_value = 0.8
-                return quality
-            if ocpn is without_ocpn:
-                quality.complexity.return_value = 3.0
-                quality.precision.return_value = 0.4
-                return quality
-            raise AssertionError("Unexpected OCPN")
+        merged_ocel = unittest.mock.Mock()
+        merged_ocel.events = pd.DataFrame({"ocel:eid": ["e1"]})
+        merged_ocel.relations = pd.DataFrame({"ocel:eid": ["e1"]})
+        reduced_ocel = unittest.mock.Mock()
+        reduced_ocel.events = pd.DataFrame({"ocel:eid": ["e1"]})
+        reduced_ocel.relations = pd.DataFrame({"ocel:eid": ["e1"]})
+        captured = {}
+
+        class _FakeQuality:
+            def __init__(self, ocpn, ocel, **kwargs):
+                captured["ocpn"] = ocpn
+                captured["kwargs"] = kwargs
+
+            def _prepare_log(self, ocel, show_progress=False):
+                return {
+                    "events": ("e1",),
+                    "ctx": {"e1": "ctx"},
+                    "log": {"ctx": frozenset({"b"})},
+                    "replay": {"ctx": [object()]},
+                }
+
+            def _replay(self, event):
+                return frozenset({"b"})
 
         with patch(
-            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
-            return_value=(fake_ocel, fake_ocel, with_ocpn, without_ocpn),
-        ) as discover_patch, patch(
+            "repo.discovery.discovery_preparation._build_projected_ocel",
+            side_effect=[
+                (merged_ocel, [], ["b", "c"]),
+                (reduced_ocel, [], ["b", "c"]),
+            ],
+        ), patch(
             "repo.discovery.net_quality.NetQuality",
-            side_effect=net_quality_side_effect,
+            _FakeQuality,
+        ):
+            precision_bundle = _build_precision_reference_bundle(
+                source_ocel=object(),
+                event_records=[],
+                object_to_type={},
+                activity_to_layer={"a": 1, "b": 2, "c": 3},
+                reference_layer=3,
+                removed_object_types={"item"},
+                current_layer_ocpn=current_ocpn,
+                previous_layer_ocpn=previous_ocpn,
+            )
+
+        self.assertIsNotNone(precision_bundle)
+        self.assertEqual(set(captured["ocpn"]["activities"]), {"b", "c"})
+        self.assertEqual(
+            {
+                transition.label
+                for transition in captured["ocpn"]["petri_nets"]["order"][0].transitions
+                if transition.label is not None
+            },
+            {"b"},
+        )
+
+    def test_build_precision_reference_bundle_samples_contexts_by_draw_count(self):
+        previous_net = _build_net(
+            "order",
+            places=["a_in", "a_out"],
+            transitions={"a_t": "a"},
+            arcs=[
+                ("a_in", "a_t"),
+                ("a_t", "a_out"),
+            ],
+        )
+        current_net = _build_net(
+            "item",
+            places=["b_in", "b_out"],
+            transitions={"b_t": "b"},
+            arcs=[
+                ("b_in", "b_t"),
+                ("b_t", "b_out"),
+            ],
+        )
+        merged_ocel = unittest.mock.Mock()
+        merged_ocel.events = pd.DataFrame({"ocel:eid": ["e1", "e2"]})
+        merged_ocel.relations = pd.DataFrame({"ocel:eid": ["e1", "e2"]})
+        reduced_ocel = unittest.mock.Mock()
+        reduced_ocel.events = pd.DataFrame({"ocel:eid": ["e1", "e2"]})
+        reduced_ocel.relations = pd.DataFrame({"ocel:eid": ["e1", "e2"]})
+        replay_event_a = object()
+        replay_event_b = object()
+
+        class _FakeQuality:
+            def __init__(self, ocpn, ocel, **kwargs):
+                self.kwargs = kwargs
+
+            def _prepare_log(self, ocel, show_progress=False):
+                if ocel is merged_ocel:
+                    return {
+                        "events": ("e1", "e2"),
+                        "ctx": {
+                            "e1": "ctx_a",
+                            "e2": "ctx_b",
+                        },
+                        "log": {
+                            "ctx_a": frozenset({"a"}),
+                            "ctx_b": frozenset({"b"}),
+                        },
+                        "replay": {
+                            "ctx_a": [replay_event_a],
+                            "ctx_b": [replay_event_b],
+                        },
+                    }
+                return {
+                    "events": ("e1", "e2"),
+                    "ctx": {
+                        "e1": "reduced_a",
+                        "e2": "reduced_b",
+                    },
+                    "log": {
+                        "reduced_a": frozenset({"a"}),
+                        "reduced_b": frozenset({"b"}),
+                    },
+                    "replay": {
+                        "reduced_a": [object()],
+                        "reduced_b": [object()],
+                    },
+                }
+
+            def _replay(self, event):
+                if event is replay_event_a:
+                    return frozenset({"a"})
+                return frozenset({"b", "c"})
+
+        with patch(
+            "repo.discovery.discovery_preparation._build_projected_ocel",
+            side_effect=[
+                (merged_ocel, [], ["a", "b"]),
+                (reduced_ocel, [], ["a", "b"]),
+            ],
+        ), patch(
+            "repo.discovery.discovery_preparation._sample_context_draw_counts",
+            return_value={"ctx_b": 3},
+        ) as sample_patch, patch(
+            "repo.discovery.net_quality.NetQuality",
+            _FakeQuality,
+        ):
+            precision_bundle = _build_precision_reference_bundle(
+                source_ocel=object(),
+                event_records=[],
+                object_to_type={},
+                activity_to_layer={"a": 1, "b": 2},
+                reference_layer=2,
+                removed_object_types=set(),
+                current_layer_ocpn=_build_ocpn({"item": current_net}),
+                previous_layer_ocpn=_build_ocpn({"order": previous_net}),
+                precision_context_sample_size=3,
+                precision_context_depth=5,
+                precision_context_sample_seed=11,
+            )
+
+        sample_patch.assert_called_once()
+        self.assertEqual(precision_bundle["context_weights"], {"ctx_b": 3})
+        self.assertEqual(precision_bundle["sampled_contexts"], ("ctx_b",))
+        self.assertEqual(
+            precision_bundle["original_enabled_by_context"],
+            {"ctx_b": frozenset({"b", "c"})},
+        )
+        self.assertEqual(
+            precision_bundle["reduced_log_enabled_by_context"],
+            {"ctx_b": frozenset({"b"})},
+        )
+        self.assertAlmostEqual(precision_bundle["precision"], 0.5)
+
+    def test_build_precision_reference_bundle_emits_progress_details(self):
+        previous_net = _build_net(
+            "order",
+            places=["a_in", "a_out"],
+            transitions={"a_t": "a"},
+            arcs=[
+                ("a_in", "a_t"),
+                ("a_t", "a_out"),
+            ],
+        )
+        current_net = _build_net(
+            "item",
+            places=["b_in", "b_out"],
+            transitions={"b_t": "b"},
+            arcs=[
+                ("b_in", "b_t"),
+                ("b_t", "b_out"),
+            ],
+        )
+        merged_ocel = unittest.mock.Mock()
+        merged_ocel.events = pd.DataFrame({"ocel:eid": ["e1"]})
+        merged_ocel.relations = pd.DataFrame({"ocel:eid": ["e1"]})
+        reduced_ocel = unittest.mock.Mock()
+        reduced_ocel.events = pd.DataFrame({"ocel:eid": ["e1"]})
+        reduced_ocel.relations = pd.DataFrame({"ocel:eid": ["e1"]})
+        prepare_progress_flags = []
+
+        class _FakeQuality:
+            def __init__(self, ocpn, ocel, **kwargs):
+                pass
+
+            def _prepare_log(self, ocel, show_progress=False):
+                prepare_progress_flags.append(show_progress)
+                return {
+                    "events": ("e1",),
+                    "ctx": {"e1": "ctx"},
+                    "log": {"ctx": frozenset({"b"})},
+                    "replay": {"ctx": [object()]},
+                }
+
+            def _replay(self, event):
+                return frozenset({"b"})
+
+        buffer = StringIO()
+        with patch(
+            "repo.discovery.discovery_preparation._build_projected_ocel",
+            side_effect=[
+                (merged_ocel, [], ["a", "b"]),
+                (reduced_ocel, [], ["a", "b"]),
+            ],
+        ), patch(
+            "repo.discovery.net_quality.NetQuality",
+            _FakeQuality,
+        ), redirect_stdout(buffer):
+            _build_precision_reference_bundle(
+                source_ocel=object(),
+                event_records=[],
+                object_to_type={},
+                activity_to_layer={"a": 1, "b": 2},
+                reference_layer=2,
+                removed_object_types=set(),
+                current_layer_ocpn=_build_ocpn({"item": current_net}),
+                previous_layer_ocpn=_build_ocpn({"order": previous_net}),
+                precision_context_sample_size=1,
+                precision_context_depth=5,
+                precision_context_sample_seed=11,
+                show_progress=True,
+            )
+
+        output = buffer.getvalue()
+        self.assertIn("Precision reference sampling:", output)
+        self.assertIn("Replaying precision reference contexts", output)
+        self.assertEqual(prepare_progress_flags, [True, True])
+
+    def test_compute_simplicity_gain_prunes_activity_and_cleanup_chain(self):
+        net = _build_net(
+            "item",
+            places=["source", "mid", "sink"],
+            transitions={
+                "a_t": "a",
+                "tau": None,
+            },
+            arcs=[
+                ("source", "a_t"),
+                ("a_t", "mid"),
+                ("mid", "tau"),
+                ("tau", "sink"),
+            ],
+        )
+        ocpn = _build_ocpn({"item": net})
+        ocpn["petri_nets"]["item"] = (
+            net,
+            Marking({_node_by_name(net.places, "source"): 1}),
+            Marking({_node_by_name(net.places, "sink"): 1}),
+        )
+
+        simplicity_gain = _compute_simplicity_gain(
+            current_model=ocpn,
+            current_ocel=None,
+            lower_layer_ocel=None,
+            component={"activities": ("a",)},
+        )
+
+        self.assertAlmostEqual(simplicity_gain, 0.8)
+
+    def test_compute_simplicity_gain_collapses_subprocess_candidates_before_pruning(self):
+        net = _build_net(
+            "item",
+            places=["in", "mid", "out"],
+            transitions={
+                "a_t": "a",
+                "b_t": "b",
+            },
+            arcs=[
+                ("in", "a_t"),
+                ("a_t", "mid"),
+                ("mid", "b_t"),
+                ("b_t", "out"),
+            ],
+        )
+        ocpn = _build_ocpn({"item": net})
+        ocpn["petri_nets"]["item"] = (
+            net,
+            Marking({_node_by_name(net.places, "in"): 1}),
+            Marking({_node_by_name(net.places, "out"): 1}),
+        )
+        subprocess_components = detect_subprocess_components(
+            ocpn,
+            {"a": 1, "b": 1},
+            reference_layer=2,
+        )
+
+        self.assertEqual(len(subprocess_components), 1)
+
+        simplicity_gain = _compute_simplicity_gain(
+            current_model=ocpn,
+            current_ocel=None,
+            lower_layer_ocel=None,
+            component={
+                "kind": "subprocess",
+                "activities": ("a", "b"),
+                "subprocess_components": tuple(subprocess_components),
+                "subprocess_activity_groups": (("a", "b"),),
+            },
+        )
+
+        self.assertAlmostEqual(simplicity_gain, 1 / 3)
+
+    def test_select_best_pruning_candidate_greedily_expands_single_best_positive_candidate(self):
+        candidates = [
+            {"id": "a", "activities": ("a",)},
+            {"id": "b", "activities": ("b",)},
+            {"id": "c", "activities": ("c",)},
+        ]
+        scores = {
+            ("a",): 0.6,
+            ("b",): 0.4,
+            ("c",): 0.1,
+            ("a", "b"): 0.2,
+            ("a", "c"): 0.5,
+            ("a", "b", "c"): -0.1,
+        }
+
+        with patch(
+            "repo.discovery.discovery_preparation._compute_simplicity_gain",
+            return_value=0.0,
+        ) as simplicity_patch, patch(
+            "repo.discovery.discovery_preparation._compute_information_loss",
+            side_effect=lambda *args: scores[tuple(args[3]["activities"])],
+        ) as information_patch, patch(
+            "repo.discovery.discovery_preparation._debug_pruning_candidate",
         ):
             best_candidate, best_score = _select_best_pruning_candidate(
-                current_model=object(),
-                current_ocel=fake_ocel,
+                current_model=_build_simple_debug_ocpn(),
+                current_ocel=object(),
                 lower_layer_ocel=None,
-                candidates=[{"activities": ("a", "b")}],
+                candidates=candidates,
             )
 
-        self.assertEqual(best_candidate, {"activities": ("a", "b")})
-        self.assertEqual(best_score, 0.25)
-        self.assertEqual(discover_patch.call_count, 1)
+        self.assertEqual(best_candidate["activities"], ("a", "c"))
+        self.assertAlmostEqual(best_score, 0.5)
+        self.assertEqual(simplicity_patch.call_count, 6)
+        self.assertEqual(information_patch.call_count, 6)
 
     def test_build_component_deletion_highlight_marks_union_across_object_types(self):
         item_net = _build_net(
@@ -1563,81 +1770,61 @@ class SubprocessDetectionTests(unittest.TestCase):
         show_patch.assert_called_once()
         close_patch.assert_called_once()
 
-    def test_select_best_pruning_candidate_emits_debug_output_for_each_candidate(self):
+    def test_select_best_pruning_candidate_skips_debug_output_by_default(self):
         candidates = [
             {"id": "a", "activities": ("a",)},
             {"id": "b", "activities": ("b",)},
         ]
+        scores = {
+            ("a",): 0.5,
+            ("b",): 0.3,
+            ("a", "b"): 0.1,
+        }
 
         with patch(
             "repo.discovery.discovery_preparation._compute_simplicity_gain",
-            side_effect=[0.7, 0.4],
+            return_value=0.0,
         ) as simplicity_patch, patch(
             "repo.discovery.discovery_preparation._compute_information_loss",
-            side_effect=[0.2, 0.1],
+            side_effect=lambda *args: scores[tuple(args[3]["activities"])],
         ) as information_patch, patch(
             "repo.discovery.discovery_preparation._debug_pruning_candidate",
         ) as debug_patch:
             best_candidate, best_score = _select_best_pruning_candidate(
-                current_model=object(),
+                current_model=_build_simple_debug_ocpn(),
                 current_ocel=object(),
                 lower_layer_ocel=None,
                 candidates=candidates,
             )
 
-        self.assertEqual(best_candidate, candidates[0])
-        self.assertAlmostEqual(best_score, 0.5)
-        self.assertEqual(simplicity_patch.call_count, 2)
-        self.assertEqual(information_patch.call_count, 2)
-        self.assertEqual(debug_patch.call_count, 2)
-        self.assertEqual(
-            debug_patch.call_args_list[0].args[4:],
-            (0.7, 0.2),
-        )
-        self.assertEqual(
-            debug_patch.call_args_list[1].args[4:],
-            (0.4, 0.1),
-        )
+        self.assertEqual(best_candidate["activities"], ("a", "b"))
+        self.assertAlmostEqual(best_score, 0.1)
+        self.assertEqual(simplicity_patch.call_count, 3)
+        self.assertEqual(information_patch.call_count, 3)
+        self.assertEqual(debug_patch.call_count, 0)
 
-    def test_debug_pruning_candidate_requests_graphic_window(self):
-        fake_ocel = _FakeInputOCEL(
-            {"item_1": "item"},
-            [
-                {"event_id": "e1", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
-            ],
-        )
-        with_ocpn = _build_simple_debug_ocpn()
-        without_ocpn = _build_simple_debug_ocpn()
-
-        def net_quality_side_effect(ocpn, ocel=None, **kwargs):
-            quality = unittest.mock.Mock()
-            if ocpn is with_ocpn:
-                quality.complexity.return_value = 10.0
-                quality.precision.return_value = 0.8
-                return quality
-            if ocpn is without_ocpn:
-                quality.complexity.return_value = 4.0
-                quality.precision.return_value = 0.5
-                return quality
-            raise AssertionError("Unexpected OCPN")
-
+    def test_select_best_pruning_candidate_returns_none_when_no_positive_candidate_exists(self):
         with patch(
-            "repo.discovery.component_deletion_impact.discover_component_and_edge_models",
-            return_value=(fake_ocel, fake_ocel, with_ocpn, without_ocpn),
-        ), patch(
-            "repo.helpers.vorbose.render_pruning_candidate_debug",
-        ) as render_patch, patch(
-            "repo.discovery.net_quality.NetQuality",
-            side_effect=net_quality_side_effect,
-        ):
-            _select_best_pruning_candidate(
-                current_model=object(),
-                current_ocel=fake_ocel,
+            "repo.discovery.discovery_preparation._compute_simplicity_gain",
+            return_value=0.2,
+        ) as simplicity_patch, patch(
+            "repo.discovery.discovery_preparation._compute_information_loss",
+            return_value=0.0,
+        ) as information_patch, patch(
+            "repo.discovery.discovery_preparation._debug_pruning_candidate",
+        ) as debug_patch:
+            best_candidate, best_score = _select_best_pruning_candidate(
+                current_model=_build_simple_debug_ocpn(),
+                current_ocel=object(),
                 lower_layer_ocel=None,
                 candidates=[{"id": "a", "activities": ("a",)}],
             )
 
-        self.assertTrue(render_patch.call_args.kwargs["show"])
+        self.assertIsNone(best_candidate)
+        self.assertEqual(best_score, 0.0)
+        self.assertEqual(simplicity_patch.call_count, 1)
+        self.assertEqual(information_patch.call_count, 1)
+        self.assertEqual(debug_patch.call_count, 0)
 
     def test_global_input_places_can_start_a_subprocess(self):
         item_net = _build_net(
@@ -1987,8 +2174,10 @@ class SubprocessDetectionTests(unittest.TestCase):
             side_effect=[
                 [],
                 [{"kind": "subprocess", "activities": ("a", "b")}],
-                [{"kind": "subprocess", "activities": ("a", "b")}],
             ],
+        ), patch(
+            "repo.discovery.discovery_preparation._select_best_pruning_candidate",
+            return_value=({"activities": ("a", "b")}, 0.1),
         ), patch(
             "repo.discovery.discovery_preparation._discover_activity_resources",
             return_value={},
@@ -2008,7 +2197,7 @@ class SubprocessDetectionTests(unittest.TestCase):
             {frozenset({"a", "b"})},
         )
 
-    def test_layer_discovery_bypasses_metric_pruning(self):
+    def test_layer_discovery_uses_metric_pruning_for_higher_layers(self):
         ocel = _FakeInputOCEL(
             {
                 "item_1": "item",
@@ -2059,14 +2248,79 @@ class SubprocessDetectionTests(unittest.TestCase):
             return_value={},
         ), patch(
             "repo.discovery.discovery_preparation._select_best_pruning_candidate",
-            side_effect=AssertionError("Metric-based pruning should be bypassed"),
-        ):
+            return_value=({"activities": ("a", "b")}, 0.2),
+        ) as select_patch:
             _, discovered_models = discover_models_for_hierarchy(
                 ocel,
                 {"order": 1, "item": 2},
             )
 
         self.assertEqual(discovered_models[2]["activities"], ["a", "b", "end", "start"])
+        select_patch.assert_called_once()
+
+    def test_layer_discovery_precomputes_precision_reference_for_higher_layers(self):
+        ocel = _FakeInputOCEL(
+            {
+                "item_1": "item",
+                "order_1": "order",
+            },
+            [
+                {"event_id": "e1", "activity": "start", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["item_1"]},
+                {"event_id": "e2", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:01:00"), "event_objects": ["item_1", "order_1"]},
+                {"event_id": "e3", "activity": "b", "timestamp": pd.Timestamp("2024-01-01T00:02:00"), "event_objects": ["item_1", "order_1"]},
+                {"event_id": "e4", "activity": "end", "timestamp": pd.Timestamp("2024-01-01T00:03:00"), "event_objects": ["item_1"]},
+            ],
+        )
+        layer_one_ocel = unittest.mock.Mock()
+        layer_one_ocel.events = pd.DataFrame({"ocel:activity": ["a", "b"]})
+        layer_two_ocel = unittest.mock.Mock()
+        layer_two_ocel.events = pd.DataFrame({"ocel:activity": ["start", "a", "b", "end"]})
+        precision_reference = {"precision": 0.75}
+
+        def build_layer_ocel_side_effect(_, __, ___, selected_object_types, ____):
+            if set(selected_object_types) == {"order"}:
+                return layer_one_ocel, [], ["a", "b"]
+            return layer_two_ocel, [], ["a", "b", "end", "start"]
+
+        def discover_with_components_side_effect(layer_ocel, *_):
+            if layer_ocel is layer_one_ocel:
+                return {"activities": ["a", "b"], "petri_nets": {"order": (object(), object(), object())}}, []
+            if layer_ocel is layer_two_ocel:
+                return {"activities": ["a", "b", "end", "start"], "petri_nets": {"item": (object(), object(), object())}}, []
+            raise AssertionError("Unexpected layer OCEL")
+
+        with patch(
+            "repo.discovery.discovery_preparation._build_layer_ocel",
+            side_effect=build_layer_ocel_side_effect,
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_ocpn_with_subprocess_components",
+            side_effect=discover_with_components_side_effect,
+        ), patch(
+            "repo.discovery.discovery_preparation._build_pruning_candidates",
+            side_effect=[[], [{"kind": "activity", "activities": ("a",)}]],
+        ), patch(
+            "repo.discovery.discovery_preparation._build_precision_reference_bundle",
+            return_value=precision_reference,
+        ) as precision_patch, patch(
+            "repo.discovery.discovery_preparation._discover_activity_resources",
+            return_value={},
+        ), patch(
+            "repo.discovery.discovery_preparation._select_best_pruning_candidate",
+            return_value=({"activities": ("a",)}, 0.2),
+        ) as select_patch:
+            _, discovered_models = discover_models_for_hierarchy(
+                ocel,
+                {"order": 1, "item": 2},
+            )
+
+        precision_patch.assert_called_once()
+        self.assertIs(
+            select_patch.call_args.kwargs["precision_bundle"],
+            precision_reference,
+        )
+        self.assertEqual(select_patch.call_args.kwargs["precision_bundle"], precision_reference)
+        self.assertIs(discovered_models[2]["precision_reference"], precision_reference)
+        self.assertEqual(precision_patch.call_args.kwargs["precision_context_depth"], 5)
 
     def test_layer_discovery_keeps_boundary_activities_attached_to_subprocess_candidates(self):
         ocel = _FakeInputOCEL(
@@ -2126,8 +2380,10 @@ class SubprocessDetectionTests(unittest.TestCase):
             side_effect=[
                 [],
                 [{"kind": "subprocess", "activities": ("pre", "a", "b", "post")}],
-                [{"kind": "subprocess", "activities": ("pre", "a", "b", "post")}],
             ],
+        ), patch(
+            "repo.discovery.discovery_preparation._select_best_pruning_candidate",
+            return_value=({"activities": ("pre", "a", "b", "post")}, 0.1),
         ), patch(
             "repo.discovery.discovery_preparation._discover_activity_resources",
             return_value={},

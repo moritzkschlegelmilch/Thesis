@@ -1,16 +1,25 @@
-from collections import defaultdict
+from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
+from itertools import product
 from numbers import Integral
+import random
 import sys
 
 import pandas as pd
 import pm4py
 from pm4py.objects.ocel.obj import OCEL
-from pm4py.objects.petri_net.obj import PetriNet
+from pm4py.objects.petri_net.obj import Marking, PetriNet
+from pm4py.objects.petri_net.utils import petri_utils
 from tqdm import tqdm
 
 from .totem import _prepare_totem_data, get_all_event_objects
-from .subprocess_detection import _component_boundary_places, collapse_sub_processes, detect_subprocess_components
+from .subprocess_detection import (
+    _clone_ocpn,
+    _component_boundary_places,
+    _sort_petri_net_node,
+    collapse_sub_processes,
+    detect_subprocess_components,
+)
 
 # Cache filtering contexts by OCEL object identity.
 _OCEL_FILTERING_CONTEXT_CACHE: dict[int, dict] = {}
@@ -282,21 +291,83 @@ def _discover_activity_resources(event_records, object_to_type, solution, refere
     return activity_resources
 
 
-def _build_layer_ocel(ocel, event_records, object_to_type, selected_object_types, selected_activities):
+def _construct_ocel(event_rows, object_rows, relation_rows, o2o_rows):
+    o2o_df = pd.DataFrame(
+        o2o_rows,
+        columns=["ocel:oid", "ocel:oid_2", "ocel:qualifier"],
+    )
+    kwargs = {
+        "events": pd.DataFrame(
+            event_rows,
+            columns=["ocel:eid", "ocel:activity", "ocel:timestamp"],
+        ),
+        "objects": pd.DataFrame(
+            object_rows,
+            columns=["ocel:oid", "ocel:type"],
+        ),
+        "relations": pd.DataFrame(
+            relation_rows,
+            columns=[
+                "ocel:eid",
+                "ocel:activity",
+                "ocel:timestamp",
+                "ocel:oid",
+                "ocel:type",
+                "ocel:qualifier",
+            ],
+        ),
+    }
+
+    try:
+        built_ocel = OCEL(
+            o2o=o2o_df,
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "unexpected keyword argument 'o2o'" not in str(exc):
+            raise
+        built_ocel = OCEL(**kwargs)
+
+    if not hasattr(built_ocel, "o2o_graph_edges"):
+        built_ocel.o2o_graph_edges = tuple(
+            (row["ocel:oid"], row["ocel:oid_2"])
+            for row in o2o_rows
+        )
+
+    return built_ocel
+
+
+def _build_projected_ocel(
+    ocel,
+    event_records,
+    object_to_type,
+    selected_activities,
+    *,
+    selected_object_types=None,
+):
     event_rows = []
     relation_rows = []
     used_objects = set()
     included_event_records = []
     included_activities = set()
+    selected_object_types = (
+        set(selected_object_types)
+        if selected_object_types is not None
+        else None
+    )
 
     for event_id, activity, timestamp, event_objects in event_records:
         if activity not in selected_activities:
             continue
 
-        selected_event_objects = [
-            obj for obj in event_objects
-            if object_to_type[obj] in selected_object_types
-        ]
+        if selected_object_types is None:
+            selected_event_objects = list(dict.fromkeys(event_objects))
+        else:
+            selected_event_objects = [
+                obj
+                for obj in event_objects
+                if object_to_type[obj] in selected_object_types
+            ]
         if not selected_event_objects:
             continue
 
@@ -337,33 +408,24 @@ def _build_layer_ocel(ocel, event_records, object_to_type, selected_object_types
         if source_obj in used_objects and target_obj in used_objects
     ]
 
-    layer_ocel = OCEL(
-        events=pd.DataFrame(
-            event_rows,
-            columns=["ocel:eid", "ocel:activity", "ocel:timestamp"],
-        ),
-        objects=pd.DataFrame(
-            object_rows,
-            columns=["ocel:oid", "ocel:type"],
-        ),
-        relations=pd.DataFrame(
-            relation_rows,
-            columns=[
-                "ocel:eid",
-                "ocel:activity",
-                "ocel:timestamp",
-                "ocel:oid",
-                "ocel:type",
-                "ocel:qualifier",
-            ],
-        ),
-        o2o=pd.DataFrame(
-            o2o_rows,
-            columns=["ocel:oid", "ocel:oid_2", "ocel:qualifier"],
-        ),
+    layer_ocel = _construct_ocel(
+        event_rows,
+        object_rows,
+        relation_rows,
+        o2o_rows,
     )
 
     return layer_ocel, included_event_records, sorted(included_activities)
+
+
+def _build_layer_ocel(ocel, event_records, object_to_type, selected_object_types, selected_activities):
+    return _build_projected_ocel(
+        ocel,
+        event_records,
+        object_to_type,
+        selected_activities,
+        selected_object_types=selected_object_types,
+    )
 
 
 def _build_ocel_from_filtering_context(filtering_context):
@@ -647,6 +709,39 @@ def _build_pruning_candidates(subprocess_components, included_activities, activi
     return candidates
 
 
+def _merge_pruning_candidates(candidates):
+    candidates = tuple(candidates)
+    if not candidates:
+        return None
+
+    activities = set()
+    subprocess_components = []
+    subprocess_activity_groups = []
+    candidate_ids = []
+
+    for candidate in candidates:
+        activities.update(candidate.get("activities", ()))
+        subprocess_components.extend(candidate.get("subprocess_components", ()))
+        subprocess_activity_groups.extend(candidate.get("subprocess_activity_groups", ()))
+        candidate_id = candidate.get("id")
+        if candidate_id is not None:
+            candidate_ids.append(str(candidate_id))
+
+    merged_candidate = {
+        "kind": "candidate_set" if len(candidates) > 1 else candidates[0].get("kind"),
+        "id": "+".join(candidate_ids) if candidate_ids else None,
+        "activities": tuple(sorted(activities)),
+        "component": None,
+        "candidates": candidates,
+    }
+    if subprocess_components:
+        merged_candidate["subprocess_components"] = tuple(subprocess_components)
+    if subprocess_activity_groups:
+        merged_candidate["subprocess_activity_groups"] = tuple(subprocess_activity_groups)
+
+    return merged_candidate
+
+
 def _prepare_pruning_candidate_context(
     current_model,
     current_ocel,
@@ -674,6 +769,546 @@ def _prepare_pruning_candidate_context(
         "component_and_edge_ocpn": component_and_edge_ocpn,
         "edge_only_ocpn": edge_only_ocpn,
         "component_and_edge_ocel": component_and_edge_ocel,
+    }
+
+
+def _merge_ocpn_models(*ocpns):
+    merged_activities = set()
+    merged_petri_nets = {}
+    merged_double_arcs = {}
+
+    for ocpn in ocpns:
+        if ocpn is None:
+            continue
+
+        merged_activities.update(
+            str(activity)
+            for activity in ocpn.get("activities", ())
+            if activity is not None
+        )
+
+        for object_type, petri_net_data in ocpn.get("petri_nets", {}).items():
+            if object_type in merged_petri_nets:
+                raise ValueError(
+                    f"Cannot merge OCPNs with duplicate object type {object_type!r}."
+                )
+            merged_petri_nets[object_type] = petri_net_data
+
+        for object_type, metadata in ocpn.get("double_arcs_on_activity", {}).items():
+            if object_type in merged_double_arcs:
+                raise ValueError(
+                    f"Cannot merge OCPNs with duplicate double-arc metadata for {object_type!r}."
+                )
+            merged_double_arcs[object_type] = dict(metadata)
+
+    if not merged_petri_nets:
+        return None
+
+    return {
+        "activities": sorted(merged_activities),
+        "object_types": set(merged_petri_nets),
+        "petri_nets": merged_petri_nets,
+        "tbr_results": {},
+        "double_arcs_on_activity": {
+            object_type: merged_double_arcs.get(object_type, {})
+            for object_type in merged_petri_nets
+        },
+    }
+
+
+def _build_model_enabled_by_context(
+    quality,
+    prepared,
+    selected_contexts=None,
+    *,
+    show_progress=False,
+    progress_desc="Replaying contexts",
+):
+    model_enabled = {}
+
+    selected_context_set = None if selected_contexts is None else set(selected_contexts)
+    if selected_context_set is None:
+        replay_items = tuple(prepared["replay"].items())
+    else:
+        replay_items = tuple(
+            (ctx, events)
+            for ctx, events in prepared["replay"].items()
+            if ctx in selected_context_set
+        )
+
+    if show_progress:
+        replay_items = tqdm(
+            replay_items,
+            total=len(replay_items),
+            desc=progress_desc,
+            leave=False,
+            file=sys.stdout,
+        )
+
+    for ctx, events in replay_items:
+        enabled = set()
+        for event in events:
+            enabled.update(quality._replay(event))
+        model_enabled[ctx] = frozenset(enabled)
+
+    return model_enabled
+
+
+def _context_weights(prepared):
+    weights = defaultdict(int)
+
+    for event_id in prepared["events"]:
+        weights[prepared["ctx"][event_id]] += 1
+
+    return {
+        ctx: weight
+        for ctx, weight in weights.items()
+    }
+
+
+def _sample_context_draw_counts(context_weights, sample_size, random_seed=None):
+    if sample_size is None:
+        return None
+    if sample_size <= 0:
+        raise ValueError("precision_context_sample_size must be positive.")
+    if not context_weights:
+        return {}
+
+    contexts = tuple(context_weights)
+    weights = tuple(context_weights[ctx] for ctx in contexts)
+    rng = random.Random(random_seed)
+    return Counter(rng.choices(contexts, weights=weights, k=sample_size))
+
+
+def _precision_from_prepared(prepared, model_enabled_by_context, context_weights=None):
+    context_weights = context_weights or _context_weights(prepared)
+    precision_sum = 0.0
+    precision_weight = 0
+
+    for ctx, weight in context_weights.items():
+        log_enabled = prepared["log"].get(ctx, frozenset())
+        model_enabled = model_enabled_by_context.get(ctx, frozenset())
+        overlap = log_enabled & model_enabled
+
+        if not model_enabled or not overlap:
+            continue
+
+        precision_sum += weight * (len(overlap) / len(model_enabled))
+        precision_weight += weight
+
+    return precision_sum / precision_weight if precision_weight else 0.0
+
+
+def _enabled_mass_by_context(context_weights, model_enabled_by_context):
+    return float(
+        sum(
+            weight * len(model_enabled_by_context.get(ctx, ()))
+            for ctx, weight in context_weights.items()
+        )
+    )
+
+
+def _reduced_log_enabled_by_original_context(
+    original_prepared,
+    reduced_prepared,
+    selected_contexts=None,
+):
+    reduced_enabled_by_context = defaultdict(set)
+    selected_contexts = None if selected_contexts is None else set(selected_contexts)
+
+    for event_id in original_prepared["events"]:
+        original_ctx = original_prepared["ctx"][event_id]
+        if selected_contexts is not None and original_ctx not in selected_contexts:
+            continue
+        reduced_ctx = reduced_prepared.get("ctx", {}).get(event_id)
+        if reduced_ctx is None:
+            continue
+
+        reduced_enabled_by_context[original_ctx].update(
+            reduced_prepared.get("log", {}).get(reduced_ctx, ())
+        )
+
+    return {
+        ctx: frozenset(labels)
+        for ctx, labels in reduced_enabled_by_context.items()
+    }
+
+
+def _reduced_binding_objects_by_type(step, affected_labels, removed_object_types):
+    if step.label not in affected_labels:
+        return tuple(
+            (object_type, tokens)
+            for object_type, tokens in step.objects_by_type
+            if tokens
+        )
+
+    return tuple(
+        (object_type, tokens)
+        for object_type, tokens in step.objects_by_type
+        if tokens and object_type not in removed_object_types
+    )
+
+
+def _fire_visible_with_virtual_reduction(
+    quality,
+    state,
+    step,
+    affected_labels,
+    removed_object_types,
+):
+    if step.label not in affected_labels:
+        return quality._fire_visible(state, step)
+
+    mc = quality._ensure_model_cache()
+    by_type = mc.visible_transitions_by_label_type.get(step.label)
+    if not by_type:
+        return []
+
+    reduced_objects_by_type = _reduced_binding_objects_by_type(
+        step,
+        affected_labels,
+        removed_object_types,
+    )
+    if not reduced_objects_by_type:
+        # After removing the current layer's object types, the affected step may
+        # become a no-op on the remaining local nets.
+        return [state]
+
+    objects_by_type = {
+        object_type: tuple(tokens)
+        for object_type, tokens in reduced_objects_by_type
+    }
+    required_types = tuple(sorted(objects_by_type))
+
+    if any(object_type not in by_type for object_type in required_types):
+        return []
+
+    result = []
+    transition_choices = [by_type[object_type] for object_type in required_types]
+
+    for combo in product(*transition_choices):
+        if all(
+            quality._tokens_enabled(state, transition.input_places, objects_by_type[object_type])
+            for object_type, transition in zip(required_types, combo)
+        ):
+            next_state = state
+
+            for object_type, transition in zip(required_types, combo):
+                next_state = quality._move_tokens(
+                    next_state,
+                    transition.input_places,
+                    transition.output_places,
+                    objects_by_type[object_type],
+                )
+
+            result.append(next_state)
+
+    return result
+
+
+def _enabled_labels_with_virtual_reduction(
+    quality,
+    state,
+    affected_labels,
+    removed_object_types,
+    enabled_label_cache,
+):
+    cache_key = (
+        quality._state_key(state),
+        affected_labels,
+        removed_object_types,
+    )
+    if cache_key in enabled_label_cache:
+        return enabled_label_cache[cache_key]
+
+    mc = quality._ensure_model_cache()
+    enabled = set()
+
+    for label in sorted(affected_labels):
+        by_type = mc.visible_transitions_by_label_type.get(label)
+        if not by_type:
+            continue
+
+        effective_types = tuple(
+            sorted(
+                object_type
+                for object_type in by_type
+                if object_type not in removed_object_types
+            )
+        )
+        if not effective_types:
+            enabled.add(label)
+            continue
+
+        transition_choices = [tuple(by_type[object_type]) for object_type in effective_types]
+        for combo in product(*transition_choices):
+            if all(quality._has_some_binding(state, transition) for transition in combo):
+                enabled.add(label)
+                break
+
+    enabled_label_cache[cache_key] = frozenset(enabled)
+    return enabled_label_cache[cache_key]
+
+
+def _replay_with_virtual_reduction(
+    quality,
+    replay_event,
+    affected_labels,
+    removed_object_types,
+    replay_cache,
+    enabled_label_cache,
+):
+    replay_key = (
+        quality._replay_signature(replay_event),
+        affected_labels,
+        removed_object_types,
+    )
+    if replay_key in replay_cache:
+        return replay_cache[replay_key]
+
+    state = quality._initial_state(replay_event)
+    queue = deque([(state, 0)])
+    visited = set()
+    enabled = set()
+    explored_nodes = 0
+
+    while queue:
+        state, index = queue.popleft()
+        key = (quality._state_key(state), index)
+
+        if key in visited:
+            continue
+
+        if (
+            quality.max_nodes_per_replay is not None
+            and explored_nodes >= quality.max_nodes_per_replay
+        ):
+            break
+
+        visited.add(key)
+        explored_nodes += 1
+
+        if index == len(replay_event.binding_sequence):
+            enabled.update(
+                _enabled_labels_with_virtual_reduction(
+                    quality,
+                    state,
+                    affected_labels,
+                    removed_object_types,
+                    enabled_label_cache,
+                )
+            )
+
+        for next_state in quality._fire_silent(state):
+            queue.append((next_state, index))
+
+        if index < len(replay_event.binding_sequence):
+            for next_state in _fire_visible_with_virtual_reduction(
+                quality,
+                state,
+                replay_event.binding_sequence[index],
+                affected_labels,
+                removed_object_types,
+            ):
+                queue.append((next_state, index + 1))
+
+    replay_cache[replay_key] = frozenset(enabled)
+    return replay_cache[replay_key]
+
+
+def _virtual_reduction_enabled_labels_by_context(precision_bundle, affected_labels):
+    affected_labels = frozenset(str(label) for label in affected_labels if label is not None)
+    if not affected_labels:
+        return {}
+
+    candidate_enabled_cache = precision_bundle.setdefault("candidate_enabled_cache", {})
+    if affected_labels in candidate_enabled_cache:
+        return candidate_enabled_cache[affected_labels]
+
+    quality = precision_bundle["quality"]
+    prepared = precision_bundle["prepared_original"]
+    removed_object_types = precision_bundle["removed_object_types"]
+    replay_cache = {}
+    enabled_label_cache = {}
+    reduced_enabled_by_context = {}
+    sampled_contexts = precision_bundle.get("sampled_contexts")
+    show_progress = precision_bundle.get("show_progress", False)
+
+    replay_items = prepared["replay"].items()
+    if sampled_contexts is not None:
+        sampled_context_set = set(sampled_contexts)
+        replay_items = (
+            (ctx, events)
+            for ctx, events in prepared["replay"].items()
+            if ctx in sampled_context_set
+        )
+
+    if show_progress:
+        replay_items = tqdm(
+            tuple(replay_items),
+            total=len(sampled_contexts) if sampled_contexts is not None else len(prepared["replay"]),
+            desc="Replaying reduced precision contexts",
+            leave=False,
+            file=sys.stdout,
+        )
+
+    for ctx, events in replay_items:
+        enabled = set()
+        for replay_event in events:
+            enabled.update(
+                _replay_with_virtual_reduction(
+                    quality,
+                    replay_event,
+                    affected_labels,
+                    removed_object_types,
+                    replay_cache,
+                    enabled_label_cache,
+                )
+            )
+        reduced_enabled_by_context[ctx] = frozenset(enabled)
+
+    candidate_enabled_cache[affected_labels] = reduced_enabled_by_context
+    return reduced_enabled_by_context
+
+
+def _build_precision_reference_bundle(
+    source_ocel,
+    event_records,
+    object_to_type,
+    activity_to_layer,
+    reference_layer,
+    removed_object_types,
+    current_layer_ocpn,
+    previous_layer_ocpn,
+    *,
+    precision_context_sample_size=None,
+    precision_context_depth=5,
+    precision_context_sample_seed=None,
+    show_progress=False,
+):
+    from .net_quality import NetQuality
+
+    if source_ocel is None or current_layer_ocpn is None or previous_layer_ocpn is None:
+        return None
+
+    projected_activities = {
+        activity
+        for activity, layer in activity_to_layer.items()
+        if layer in {reference_layer - 1, reference_layer}
+    }
+    if not projected_activities:
+        return None
+
+    projected_previous_layer_ocpn = _project_ocpn_to_activities(
+        previous_layer_ocpn,
+        projected_activities,
+    )
+    projected_current_layer_ocpn = _project_ocpn_to_activities(
+        current_layer_ocpn,
+        projected_activities,
+    )
+    merged_ocpn = _merge_ocpn_models(
+        projected_previous_layer_ocpn,
+        projected_current_layer_ocpn,
+    )
+    if merged_ocpn is None:
+        return None
+
+    merged_ocel, _, _ = _build_projected_ocel(
+        source_ocel,
+        event_records,
+        object_to_type,
+        projected_activities,
+        selected_object_types=None,
+    )
+    if merged_ocel.events.empty or merged_ocel.relations.empty:
+        return None
+
+    quality = NetQuality(
+        merged_ocpn,
+        merged_ocel,
+        precision_context_sample_size=precision_context_sample_size,
+        precision_context_depth=precision_context_depth,
+        random_seed=precision_context_sample_seed,
+    )
+    prepared_original = quality._prepare_log(merged_ocel, show_progress=show_progress)
+    exact_context_weights = _context_weights(prepared_original)
+    sampled_context_weights = _sample_context_draw_counts(
+        exact_context_weights,
+        precision_context_sample_size,
+        random_seed=precision_context_sample_seed,
+    )
+    context_weights = sampled_context_weights or exact_context_weights
+    sampled_contexts = tuple(
+        ctx
+        for ctx in prepared_original["replay"]
+        if ctx in context_weights
+    )
+    if show_progress:
+        sampled_events = sum(context_weights.values())
+        tqdm.write(
+            "Precision reference sampling: "
+            f"contexts={len(sampled_contexts)}/{len(exact_context_weights)}, "
+            f"draws={sampled_events}, "
+            f"mode={'sampled' if sampled_context_weights is not None else 'exact'}, "
+            f"depth={'full' if precision_context_depth is None else precision_context_depth}",
+            file=sys.stdout,
+        )
+    original_enabled_by_context = _build_model_enabled_by_context(
+        quality,
+        prepared_original,
+        selected_contexts=sampled_contexts if sampled_context_weights is not None else None,
+        show_progress=show_progress,
+        progress_desc="Replaying precision reference contexts",
+    )
+    baseline_enabled_mass = _enabled_mass_by_context(
+        context_weights,
+        original_enabled_by_context,
+    )
+    original_precision = _precision_from_prepared(
+        prepared_original,
+        original_enabled_by_context,
+        context_weights=context_weights,
+    )
+
+    remaining_object_types = set(object_to_type.values()) - set(removed_object_types)
+    reduced_log_ocel, _, _ = _build_projected_ocel(
+        source_ocel,
+        event_records,
+        object_to_type,
+        projected_activities,
+        selected_object_types=remaining_object_types,
+    )
+    if reduced_log_ocel.events.empty or reduced_log_ocel.relations.empty:
+        reduced_prepared = {
+            "events": tuple(),
+            "ctx": {},
+            "log": {},
+            "replay": {},
+        }
+    else:
+        reduced_prepared = quality._prepare_log(reduced_log_ocel, show_progress=show_progress)
+
+    return {
+        "quality": quality,
+        "original_ocpn": merged_ocpn,
+        "original_ocel": merged_ocel,
+        "reduced_log_ocel": reduced_log_ocel,
+        "prepared_original": prepared_original,
+        "original_enabled_by_context": original_enabled_by_context,
+        "context_weights": context_weights,
+        "baseline_enabled_mass": baseline_enabled_mass,
+        "reduced_log_enabled_by_context": _reduced_log_enabled_by_original_context(
+            prepared_original,
+            reduced_prepared,
+            selected_contexts=sampled_contexts if sampled_context_weights is not None else None,
+        ),
+        "removed_object_types": frozenset(str(object_type) for object_type in removed_object_types),
+        "projected_activities": frozenset(str(activity) for activity in projected_activities),
+        "precision": original_precision,
+        "candidate_enabled_cache": {},
+        "sampled_contexts": sampled_contexts if sampled_context_weights is not None else None,
+        "show_progress": show_progress,
     }
 
 
@@ -710,9 +1345,52 @@ def _compute_information_loss_from_prepared_context(prepared_context):
     return information_loss
 
 
-def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, component):
+def _compute_information_loss(
+    current_model,
+    current_ocel,
+    lower_layer_ocel,
+    component,
+    precision_bundle=None,
+):
     component_activities = tuple(component.get("activities", ()))
-    if current_model is None or current_ocel is None or not component_activities:
+    if not component_activities:
+        return 0
+
+    if precision_bundle is not None:
+        baseline_enabled_mass = precision_bundle.get("baseline_enabled_mass", 0.0)
+        if baseline_enabled_mass <= 0:
+            return 0
+
+        affected_labels = frozenset(
+            str(activity)
+            for activity in component_activities
+            if activity is not None
+        )
+        reduced_enabled_by_context = _virtual_reduction_enabled_labels_by_context(
+            precision_bundle,
+            affected_labels,
+        )
+        unsupported_mass = 0.0
+
+        for ctx, weight in precision_bundle.get("context_weights", {}).items():
+            original_enabled = precision_bundle["original_enabled_by_context"].get(
+                ctx,
+                frozenset(),
+            )
+            reduced_enabled = reduced_enabled_by_context.get(ctx, frozenset())
+            new_labels = reduced_enabled - original_enabled
+            if not new_labels:
+                continue
+
+            unsupported_labels = new_labels - precision_bundle["reduced_log_enabled_by_context"].get(
+                ctx,
+                frozenset(),
+            )
+            unsupported_mass += weight * len(unsupported_labels)
+
+        return unsupported_mass / baseline_enabled_mass
+
+    if current_model is None or current_ocel is None:
         return 1
 
     prepared_context = _prepare_pruning_candidate_context(
@@ -722,7 +1400,6 @@ def _compute_information_loss(current_model, current_ocel, lower_layer_ocel, com
         component_activities,
         build_component_and_edge_ocel=True,
     )
-
     return _compute_information_loss_from_prepared_context(prepared_context)
 
 
@@ -761,20 +1438,368 @@ def _compute_simplicity_gain_from_prepared_context(prepared_context, component):
     return simplicity_gain
 
 
-def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, component):
-    component_activities = tuple(component.get("activities", ()))
-    if current_model is None or current_ocel is None or not component_activities:
-        return 0
+def _is_variable_arc(ocpn, object_type, arc):
+    if bool(getattr(arc, "variable", False)):
+        return True
 
-    prepared_context = _prepare_pruning_candidate_context(
-        current_model,
-        current_ocel,
-        lower_layer_ocel,
-        component_activities,
-        build_component_and_edge_ocel=False,
+    transition = None
+    if isinstance(arc.source, PetriNet.Transition):
+        transition = arc.source
+    elif isinstance(arc.target, PetriNet.Transition):
+        transition = arc.target
+
+    if transition is None or transition.label is None:
+        return False
+
+    return bool(
+        ocpn.get("double_arcs_on_activity", {})
+        .get(object_type, {})
+        .get(str(transition.label), False)
     )
 
-    return _compute_simplicity_gain_from_prepared_context(prepared_context, component)
+
+def _simplicity_estimator_score(ocpn):
+    if ocpn is None:
+        return 0.0
+
+    visible_activities = set()
+    place_count = 0
+    silent_transition_count = 0
+    arc_count = 0
+    variable_arc_count = 0
+
+    for object_type, (net, _, _) in ocpn["petri_nets"].items():
+        place_count += len(net.places)
+
+        for transition in net.transitions:
+            if transition.label is None:
+                silent_transition_count += 1
+            else:
+                visible_activities.add(str(transition.label))
+
+        for arc in net.arcs:
+            arc_count += 1
+            if _is_variable_arc(ocpn, object_type, arc):
+                variable_arc_count += 1
+
+    return float(
+        len(visible_activities)
+        + place_count
+        + 2 * silent_transition_count
+        + arc_count
+        + variable_arc_count
+    )
+
+
+def _copy_double_arc_metadata(source_ocpn, target_ocpn):
+    target_ocpn["double_arcs_on_activity"] = {
+        object_type: dict(
+            source_ocpn.get("double_arcs_on_activity", {}).get(object_type, {})
+        )
+        for object_type in target_ocpn.get("petri_nets", {})
+    }
+
+
+def _filter_marking_to_net(marking, net):
+    filtered_marking = Marking()
+
+    for place, count in marking.items():
+        if place in net.places and count:
+            filtered_marking[place] = count
+
+    return filtered_marking
+
+
+def _refresh_ocpn_activity_metadata(ocpn):
+    if ocpn is None:
+        return
+
+    ocpn["activities"] = sorted({
+        str(transition.label)
+        for net, _, _ in ocpn.get("petri_nets", {}).values()
+        for transition in net.transitions
+        if transition.label is not None
+    })
+
+    double_arcs_on_activity = ocpn.setdefault("double_arcs_on_activity", {})
+    for object_type, (net, _, _) in ocpn.get("petri_nets", {}).items():
+        remaining_labels = {
+            str(transition.label)
+            for transition in net.transitions
+            if transition.label is not None
+        }
+        double_arcs_on_activity[object_type] = {
+            str(label): value
+            for label, value in double_arcs_on_activity.get(object_type, {}).items()
+            if str(label) in remaining_labels
+        }
+
+
+def _project_ocpn_to_activities(ocpn, allowed_activities):
+    if ocpn is None:
+        return None
+
+    allowed_labels = {
+        str(activity)
+        for activity in allowed_activities
+        if activity is not None
+    }
+    projected_ocpn, _ = _clone_ocpn(ocpn)
+    if projected_ocpn is None:
+        return None
+
+    _copy_double_arc_metadata(ocpn, projected_ocpn)
+
+    for object_type, (net, _, _) in projected_ocpn["petri_nets"].items():
+        transitions_to_remove = [
+            transition
+            for transition in sorted(net.transitions, key=_sort_petri_net_node)
+            if transition.label is not None
+            and str(transition.label) not in allowed_labels
+        ]
+        for transition in transitions_to_remove:
+            if transition in net.transitions:
+                petri_utils.remove_transition(net, transition)
+
+    boundary_places = _boundary_places_by_type(projected_ocpn)
+    while True:
+        removed_orphan_places, _ = _remove_orphan_places_from_working_ocpn(
+            projected_ocpn,
+            boundary_places,
+        )
+        removed_silent_transitions, _ = _remove_useless_silent_transitions_from_working_ocpn(
+            projected_ocpn
+        )
+        if not removed_orphan_places and not removed_silent_transitions:
+            break
+
+    for object_type, (net, initial_marking, final_marking) in projected_ocpn["petri_nets"].items():
+        projected_ocpn["petri_nets"][object_type] = (
+            net,
+            _filter_marking_to_net(initial_marking, net),
+            _filter_marking_to_net(final_marking, net),
+        )
+
+    _refresh_ocpn_activity_metadata(projected_ocpn)
+    return projected_ocpn
+
+
+def _build_simplicity_gain_working_ocpn(current_model, component):
+    if current_model is None:
+        return None, frozenset()
+
+    subprocess_components = tuple(component.get("subprocess_components", ()))
+    if not subprocess_components:
+        subprocess_activity_groups = _candidate_subprocess_activity_groups(component)
+        if subprocess_activity_groups:
+            subprocess_components = _match_subprocess_components_by_activity_groups(
+                current_model,
+                subprocess_activity_groups,
+            )
+
+    if subprocess_components:
+        working_ocpn, inserted_transitions = collapse_sub_processes(
+            current_model,
+            list(subprocess_components),
+        )
+    else:
+        working_ocpn, _ = _clone_ocpn(current_model)
+        inserted_transitions = frozenset()
+
+    if working_ocpn is None:
+        return None, frozenset()
+
+    _copy_double_arc_metadata(current_model, working_ocpn)
+    return working_ocpn, inserted_transitions
+
+
+def _remove_arc_and_track_score(net, arc, object_type, ocpn):
+    removed_score = 1
+    if _is_variable_arc(ocpn, object_type, arc):
+        removed_score += 1
+    petri_utils.remove_arc(net, arc)
+    return removed_score
+
+
+def _remove_place_and_track_score(net, place, object_type, ocpn):
+    removed_score = 1
+    for arc in tuple(place.in_arcs) + tuple(place.out_arcs):
+        if arc in net.arcs:
+            removed_score += _remove_arc_and_track_score(net, arc, object_type, ocpn)
+    petri_utils.remove_place(net, place)
+    return removed_score
+
+
+def _remove_transition_and_track_score(net, transition, object_type, ocpn, removed_visible_labels):
+    removed_score = 0
+    for arc in tuple(transition.in_arcs) + tuple(transition.out_arcs):
+        if arc in net.arcs:
+            removed_score += _remove_arc_and_track_score(net, arc, object_type, ocpn)
+
+    if transition.label is None:
+        removed_score += 2
+    else:
+        visible_label = str(transition.label)
+        if visible_label not in removed_visible_labels:
+            removed_visible_labels.add(visible_label)
+            removed_score += 1
+
+    petri_utils.remove_transition(net, transition)
+    return removed_score
+
+
+def _boundary_places_by_type(ocpn):
+    boundary_places = defaultdict(set)
+
+    for object_type, (net, initial_marking, final_marking) in ocpn["petri_nets"].items():
+        for place, count in initial_marking.items():
+            if count > 0 and place in net.places:
+                boundary_places[object_type].add(place)
+        for place, count in final_marking.items():
+            if count > 0 and place in net.places:
+                boundary_places[object_type].add(place)
+
+    return {
+        object_type: frozenset(places)
+        for object_type, places in boundary_places.items()
+    }
+
+
+def _prune_candidate_activities_from_working_ocpn(working_ocpn, component, inserted_transitions):
+    collapsed_subprocess_activities = {
+        activity
+        for group in _candidate_subprocess_activity_groups(component)
+        for activity in group
+    }
+    visible_labels_to_remove = {
+        str(activity)
+        for activity in component.get("activities", ())
+        if activity not in collapsed_subprocess_activities
+    }
+    inserted_transition_keys = {
+        (object_type, transition)
+        for object_type, transition in inserted_transitions
+    }
+
+    removed_score = 0
+    removed_visible_labels = set()
+
+    for object_type, (net, _, _) in working_ocpn["petri_nets"].items():
+        transitions_to_remove = [
+            transition
+            for transition in sorted(net.transitions, key=_sort_petri_net_node)
+            if (transition.label is not None and str(transition.label) in visible_labels_to_remove)
+            or (object_type, transition) in inserted_transition_keys
+        ]
+        for transition in transitions_to_remove:
+            if transition not in net.transitions:
+                continue
+            removed_score += _remove_transition_and_track_score(
+                net,
+                transition,
+                object_type,
+                working_ocpn,
+                removed_visible_labels,
+            )
+
+    return removed_score
+
+
+def _remove_orphan_places_from_working_ocpn(working_ocpn, boundary_places):
+    removed_score = 0
+    removed_any = False
+
+    for object_type, (net, _, _) in working_ocpn["petri_nets"].items():
+        protected_places = boundary_places.get(object_type, frozenset())
+        orphan_places = [
+            place
+            for place in sorted(net.places, key=_sort_petri_net_node)
+            if place not in protected_places
+            and (not place.in_arcs or not place.out_arcs)
+        ]
+        for place in orphan_places:
+            if place not in net.places:
+                continue
+            removed_score += _remove_place_and_track_score(
+                net,
+                place,
+                object_type,
+                working_ocpn,
+            )
+            removed_any = True
+
+    return removed_any, removed_score
+
+
+def _remove_useless_silent_transitions_from_working_ocpn(working_ocpn):
+    removed_score = 0
+    removed_any = False
+    removed_visible_labels = set()
+
+    for object_type, (net, _, _) in working_ocpn["petri_nets"].items():
+        silent_transitions = [
+            transition
+            for transition in sorted(net.transitions, key=_sort_petri_net_node)
+            if transition.label is None
+            and (not transition.in_arcs or not transition.out_arcs)
+        ]
+        for transition in silent_transitions:
+            if transition not in net.transitions:
+                continue
+            removed_score += _remove_transition_and_track_score(
+                net,
+                transition,
+                object_type,
+                working_ocpn,
+                removed_visible_labels,
+            )
+            removed_any = True
+
+    return removed_any, removed_score
+
+
+def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, component, baseline_score=None):
+    del current_ocel, lower_layer_ocel
+
+    component_activities = tuple(component.get("activities", ()))
+    if current_model is None or not component_activities:
+        return 0
+
+    if baseline_score is None:
+        baseline_score = _simplicity_estimator_score(current_model)
+    if baseline_score <= 0:
+        return 0
+
+    working_ocpn, inserted_transitions = _build_simplicity_gain_working_ocpn(
+        current_model,
+        component,
+    )
+    if working_ocpn is None:
+        return 0
+
+    removed_score = _prune_candidate_activities_from_working_ocpn(
+        working_ocpn,
+        component,
+        inserted_transitions,
+    )
+
+    boundary_places = _boundary_places_by_type(working_ocpn)
+    while True:
+        removed_orphan_places, orphan_place_score = _remove_orphan_places_from_working_ocpn(
+            working_ocpn,
+            boundary_places,
+        )
+        removed_score += orphan_place_score
+
+        removed_silent_transitions, silent_transition_score = (
+            _remove_useless_silent_transitions_from_working_ocpn(working_ocpn)
+        )
+        removed_score += silent_transition_score
+
+        if not removed_orphan_places and not removed_silent_transitions:
+            break
+
+    return removed_score / baseline_score
 
 
 def _build_collapsed_subprocess_model(component_and_edge_ocpn, subprocess_activity_groups):
@@ -877,7 +1902,7 @@ def _debug_pruning_candidate(current_model, current_ocel, lower_layer_ocel, cand
     #     summary_metrics={
     #         "Simplicity gain": simplicity_gain,
     #         "Precision loss": information_loss,
-    #         "Score": simplicity_gain - information_loss,
+    #         "Score": information_loss - simplicity_gain,
     #     },
     #     output_path=output_path,
     #     show=True,
@@ -890,52 +1915,109 @@ def _select_best_pruning_candidate(
     lower_layer_ocel,
     candidates,
     *,
+    precision_bundle=None,
     show_progress=False,
     progress_desc="Evaluating pruning candidates",
 ):
+    candidates = list(candidates)
+    if not candidates:
+        return None, 0.0
+
     best_candidate = None
-    best_score = float("-inf")
+    best_score = 0.0
+    frontier = [tuple([index]) for index in range(len(candidates))]
+    simplicity_baseline_score = _simplicity_estimator_score(current_model)
 
-    candidate_iter = candidates
-    if show_progress:
-        candidate_iter = tqdm(
-            candidates,
-            total=len(candidates),
-            desc=progress_desc,
-            leave=False,
-            file=sys.stdout,
-        )
+    round_number = 1
+    while frontier:
+        frontier_iter = frontier
+        if show_progress:
+            frontier_iter = tqdm(
+                frontier,
+                total=len(frontier),
+                desc=f"{progress_desc} (round {round_number})",
+                leave=False,
+                file=sys.stdout,
+            )
 
-    for candidate in candidate_iter:
-        component_activities = tuple(candidate.get("activities", ()))
-        prepared_context = None
-        if current_model is not None and current_ocel is not None and component_activities:
-            prepared_context = _prepare_pruning_candidate_context(
+        positive_results = []
+        extension_indices = set()
+
+        for candidate_indices in frontier_iter:
+            merged_candidate = _merge_pruning_candidates(
+                candidates[index]
+                for index in candidate_indices
+            )
+            simplicity_gain = _compute_simplicity_gain(
                 current_model,
                 current_ocel,
                 lower_layer_ocel,
-                component_activities,
-                build_component_and_edge_ocel=True,
+                merged_candidate,
+                simplicity_baseline_score,
             )
-        simplicity_gain = _compute_simplicity_gain_from_prepared_context(prepared_context, candidate)
-        information_loss = _compute_information_loss_from_prepared_context(prepared_context)
-        score = simplicity_gain - information_loss
-
-        if show_progress:
-            candidate_label = candidate.get("id") or ",".join(component_activities)
-            candidate_iter.set_postfix_str(
-                f"best={best_score:.3f} current={score:.3f} candidate={candidate_label}",
-                refresh=False,
+            information_loss = _compute_information_loss(
+                current_model,
+                current_ocel,
+                lower_layer_ocel,
+                merged_candidate,
+                precision_bundle,
             )
+            # _debug_pruning_candidate(
+            #     current_model,
+            #     current_ocel,
+            #     lower_layer_ocel,
+            #     merged_candidate,
+            #     simplicity_gain,
+            #     information_loss,
+            # )
+            score = information_loss - simplicity_gain
 
-        if score > best_score:
-            best_candidate = candidate
-            best_score = score
+            if show_progress:
+                candidate_label = merged_candidate.get("id") or ",".join(
+                    merged_candidate.get("activities", ())
+                )
+                frontier_iter.set_postfix_str(
+                    f"best={best_score:.3f} current={score:.3f} candidate={candidate_label}",
+                    refresh=False,
+                )
+
+            if score < 0:
+                continue
+
+            positive_results.append((candidate_indices, merged_candidate, score))
+            extension_indices.update(candidate_indices)
+
+        if not positive_results:
+            break
+
+        best_candidate_indices, best_candidate, best_score = max(
+            positive_results,
+            key=lambda result: result[2],
+        )
+        extension_indices.difference_update(best_candidate_indices)
+        if not extension_indices:
+            break
+
+        frontier = [
+            tuple(sorted(best_candidate_indices + (candidate_index,)))
+            for candidate_index in sorted(extension_indices)
+            if candidate_index not in best_candidate_indices
+        ]
+        round_number += 1
 
     return best_candidate, best_score
 
 
-def discover_models_for_hierarchy(ocel, solution, layer_context=None, show_progress=False):
+def discover_models_for_hierarchy(
+    ocel,
+    solution,
+    layer_context=None,
+    show_progress=False,
+    *,
+    precision_context_sample_size=512,
+    precision_context_depth=5,
+    precision_context_sample_seed=None,
+):
     object_to_type, event_records = _extract_ocel_filtering_context(ocel)
     activity_to_layer = {}
     layer_to_object_types = defaultdict(set)
@@ -977,14 +2059,96 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None, show_progr
             for activity, activity_layer in activity_to_layer.items()
             if activity_layer <= layer and layer - activity_layer <= layer_context_by_layer[layer]
         }
+        progress_prefix = f"Layer {layer}"
 
-        i = 0
-        while True:
-            i += 1
-            progress_prefix = f"Layer {layer} iteration {i}"
+        with _progress_step(
+            f"{progress_prefix}: building temporary layer log",
+            enabled=show_progress,
+            progress_bar=layer_progress_bar,
+        ):
+            layer_ocel, included_event_records, included_activities = _build_layer_ocel(
+                ocel,
+                event_records,
+                object_to_type,
+                selected_object_types,
+                active_activities,
+            )
 
+        ocpn, subprocess_components = _discover_ocpn_with_subprocess_components(
+            layer_ocel,
+            activity_to_layer,
+            layer,
+            show_progress,
+            progress_prefix,
+            layer_progress_bar,
+        )
+
+        with _progress_step(
+            f"{progress_prefix}: building pruning candidates",
+            enabled=show_progress,
+            progress_bar=layer_progress_bar,
+        ):
+            candidates = _build_pruning_candidates(
+                subprocess_components,
+                included_activities,
+                activity_to_layer,
+                layer,
+            )
+
+        precision_reference = None
+        if layer_index > 0 and ocpn is not None:
+            previous_layer = discovered_layers[layer_index - 1]
+            previous_layer_model = discovered_models.get(previous_layer)
+            previous_layer_ocpn = None
+            if previous_layer_model is not None:
+                previous_layer_ocpn = previous_layer_model.get("ocpn")
+
+            if previous_layer_ocpn is not None:
+                with _progress_step(
+                    f"{progress_prefix}: precomputing precision reference",
+                    enabled=show_progress,
+                    progress_bar=layer_progress_bar,
+                ):
+                    precision_reference = _build_precision_reference_bundle(
+                        ocel,
+                        event_records,
+                        object_to_type,
+                        activity_to_layer,
+                        layer,
+                        selected_object_types,
+                        ocpn,
+                        previous_layer_ocpn,
+                        precision_context_sample_size=precision_context_sample_size,
+                        precision_context_depth=precision_context_depth,
+                        precision_context_sample_seed=precision_context_sample_seed,
+                        show_progress=show_progress,
+                    )
+
+        selected_candidate = None
+        if candidates:
             with _progress_step(
-                f"{progress_prefix}: building layer log",
+                f"{progress_prefix}: greedy pruning search",
+                enabled=show_progress,
+                progress_bar=layer_progress_bar,
+            ):
+                selected_candidate, _ = _select_best_pruning_candidate(
+                    current_model=ocpn,
+                    current_ocel=layer_ocel,
+                    lower_layer_ocel=None,
+                    candidates=candidates,
+                    precision_bundle=precision_reference,
+                    show_progress=show_progress,
+                    progress_desc=f"{progress_prefix}: evaluating candidate sets",
+                )
+
+        retained_lower_layer_activities = set()
+        if selected_candidate is not None:
+            retained_lower_layer_activities.update(selected_candidate.get("activities", ()))
+
+        final_active_activities = native_layer_activities | retained_lower_layer_activities
+        if final_active_activities != active_activities:
+            with _progress_step(
+                f"{progress_prefix}: rebuilding final layer log",
                 enabled=show_progress,
                 progress_bar=layer_progress_bar,
             ):
@@ -993,52 +2157,17 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None, show_progr
                     event_records,
                     object_to_type,
                     selected_object_types,
-                    active_activities,
+                    final_active_activities,
                 )
 
-            ocpn, iteration_components = _discover_ocpn_with_subprocess_components(
+            ocpn, subprocess_components = _discover_ocpn_with_subprocess_components(
                 layer_ocel,
                 activity_to_layer,
                 layer,
                 show_progress,
-                progress_prefix,
+                f"{progress_prefix} final",
                 layer_progress_bar,
             )
-            subprocess_components = iteration_components
-
-            with _progress_step(
-                f"{progress_prefix}: building pruning candidates",
-                enabled=show_progress,
-                progress_bar=layer_progress_bar,
-            ):
-                candidates = _build_pruning_candidates(
-                    iteration_components,
-                    included_activities,
-                    activity_to_layer,
-                    layer,
-                )
-
-            # Temporary correctness mode:
-            # keep only native activities for this layer plus lower-layer
-            # activities that belong to detected subprocess candidates.
-            # Candidate activities already include any standalone
-            # boundary-adjacent activities attached in
-            # _build_pruning_candidates().
-            with _progress_step(
-                f"{progress_prefix}: retaining subprocess activities",
-                enabled=show_progress,
-                progress_bar=layer_progress_bar,
-            ):
-                retained_subprocess_activities = {
-                    activity
-                    for candidate in candidates
-                    if candidate.get("kind") == "subprocess"
-                    for activity in candidate.get("activities", ())
-                }
-            next_active_activities = native_layer_activities | retained_subprocess_activities
-            if next_active_activities == active_activities:
-                break
-            active_activities = next_active_activities
 
         with _progress_step(
             f"Layer {layer}: deriving activity resources",
@@ -1068,6 +2197,7 @@ def discover_models_for_hierarchy(ocel, solution, layer_context=None, show_progr
             "ocel": layer_ocel,
             "ocpn": ocpn,
             "subprocess_components": subprocess_components,
+            "precision_reference": precision_reference,
         }
 
         if layer_progress_bar is not None:

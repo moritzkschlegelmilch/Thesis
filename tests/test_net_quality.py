@@ -263,6 +263,125 @@ class NetQualityTests(unittest.TestCase):
         self.assertAlmostEqual(quality.fitness(), 4 / 6, places=6)
         self.assertAlmostEqual(quality.precision(), 1.0, places=6)
 
+    def test_precision_context_sampling_uses_weighted_draw_average(self):
+        quality = NetQuality(
+            _build_flower_ocpn(["create", "approve"]),
+            precision_context_sample_size=4,
+            random_seed=7,
+        )
+        prepared = {
+            "events": ("e1", "e2", "e3"),
+            "ctx": {
+                "e1": "ctx_a",
+                "e2": "ctx_a",
+                "e3": "ctx_b",
+            },
+            "log": {
+                "ctx_a": frozenset({"create"}),
+                "ctx_b": frozenset({"approve"}),
+            },
+            "replay": {
+                "ctx_a": [object(), object()],
+                "ctx_b": [object()],
+            },
+        }
+
+        with mock.patch.object(
+            quality,
+            "_prepare_log",
+            return_value=prepared,
+        ), mock.patch.object(
+            quality,
+            "_sample_precision_context_draw_counts",
+            return_value={"ctx_a": 3, "ctx_b": 1},
+        ), mock.patch.object(
+            quality,
+            "_build_model_enabled_by_context",
+            return_value={
+                "ctx_a": frozenset({"create", "approve"}),
+                "ctx_b": frozenset({"approve"}),
+            },
+        ) as build_patch:
+            precision = quality.precision()
+
+        self.assertAlmostEqual(precision, (3 * 0.5 + 1 * 1.0) / 4, places=6)
+        build_patch.assert_called_once_with(
+            prepared,
+            selected_contexts={"ctx_a": 3, "ctx_b": 1},
+            show_progress=False,
+            progress_desc="Replaying sampled contexts",
+        )
+
+    def test_precision_context_sampling_preserves_skip_behavior(self):
+        quality = NetQuality(
+            _build_flower_ocpn(["create", "approve"]),
+            precision_context_sample_size=4,
+            random_seed=7,
+        )
+        prepared = {
+            "events": ("e1", "e2"),
+            "ctx": {
+                "e1": "ctx_a",
+                "e2": "ctx_b",
+            },
+            "log": {
+                "ctx_a": frozenset({"create"}),
+                "ctx_b": frozenset({"approve"}),
+            },
+            "replay": {
+                "ctx_a": [object()],
+                "ctx_b": [object()],
+            },
+        }
+
+        with mock.patch.object(
+            quality,
+            "_prepare_log",
+            return_value=prepared,
+        ), mock.patch.object(
+            quality,
+            "_sample_precision_context_draw_counts",
+            return_value={"ctx_a": 1, "ctx_b": 3},
+        ), mock.patch.object(
+            quality,
+            "_build_model_enabled_by_context",
+            return_value={
+                "ctx_a": frozenset({"create", "approve"}),
+                "ctx_b": frozenset({"reject"}),
+            },
+        ):
+            precision = quality.precision()
+
+        self.assertAlmostEqual(precision, 0.5, places=6)
+
+    def test_prepare_log_can_limit_context_predecessor_depth(self):
+        ocel = _build_single_type_ocel([
+            ["create", "approve", "complete", "ship"],
+        ])
+        ocpn = _build_flower_ocpn(["create", "approve", "complete", "ship"])
+        depth_one_quality = NetQuality(ocpn, ocel, precision_context_depth=1)
+        depth_two_quality = NetQuality(ocpn, ocel, precision_context_depth=2)
+        full_quality = NetQuality(ocpn, ocel)
+
+        depth_one_prepared = depth_one_quality._prepare_log(ocel)
+        depth_two_prepared = depth_two_quality._prepare_log(ocel)
+        full_prepared = full_quality._prepare_log(ocel)
+
+        depth_one_ctx = depth_one_prepared["ctx"]["e4"]
+        depth_two_ctx = depth_two_prepared["ctx"]["e4"]
+        full_ctx = full_prepared["ctx"]["e4"]
+
+        depth_one_binding = depth_one_prepared["replay"][depth_one_ctx][0].binding_sequence
+        depth_two_binding = depth_two_prepared["replay"][depth_two_ctx][0].binding_sequence
+        full_binding = full_prepared["replay"][full_ctx][0].binding_sequence
+
+        self.assertEqual([step.label for step in depth_one_binding], ["complete"])
+        self.assertEqual([step.label for step in depth_two_binding], ["approve", "complete"])
+        self.assertEqual(
+            [step.label for step in full_binding],
+            ["create", "approve", "complete"],
+        )
+
     def test_progress_output_can_be_enabled(self):
         ocel = _build_single_type_ocel([
             ["create", "approve", "complete"],
@@ -278,7 +397,7 @@ class NetQualityTests(unittest.TestCase):
         output = buffer.getvalue()
 
         self.assertAlmostEqual(fitness, 1.0, places=6)
-        self.assertIn("Preparing event contexts", output)
+        self.assertIn("Preparing OCPA-style event contexts", output)
         self.assertIn("Replaying contexts", output)
         self.assertIn("Aggregating scores", output)
         self.assertIn("Done.", output)
@@ -286,7 +405,7 @@ class NetQualityTests(unittest.TestCase):
     def test_complexity_for_single_type_net(self):
         quality = NetQuality(_build_restrictive_ocpn())
 
-        self.assertEqual(quality.complexity(), 12)
+        self.assertEqual(quality.complexity(), 13)
 
     def test_complexity_merges_visible_transitions_like_pm4py(self):
         item_net = _build_net(
@@ -310,9 +429,9 @@ class NetQualityTests(unittest.TestCase):
 
         quality = NetQuality(_build_ocpn({"item": item_net, "order": order_net}))
 
-        self.assertEqual(quality.complexity(), 12)
+        self.assertEqual(quality.complexity(), 13)
 
-    def test_complexity_uses_beta_for_silent_transitions(self):
+    def test_complexity_weights_silent_transitions_by_two(self):
         silent_net = _build_net(
             "order",
             places=["start", "mid", "end"],
@@ -330,8 +449,48 @@ class NetQualityTests(unittest.TestCase):
 
         quality = NetQuality(_build_ocpn({"order": silent_net}))
 
-        self.assertEqual(quality.complexity(), 12)
-        self.assertEqual(quality.complexity(alpha=2, beta=3), 14)
+        self.assertEqual(quality.complexity(), 10)
+
+    def test_complexity_counts_variable_arcs_from_double_arc_metadata(self):
+        variable_net = _build_net(
+            "order",
+            places=["start", "end"],
+            transitions={"a": "a"},
+            arcs=[
+                ("start", "a"),
+                ("a", "end"),
+            ],
+        )
+        ocpn = _build_ocpn({"order": variable_net})
+        ocpn["double_arcs_on_activity"]["order"]["a"] = True
+
+        quality = NetQuality(ocpn)
+
+        self.assertEqual(quality.complexity(), 7)
+
+    def test_complexity_doubles_silent_synchronization_penalty(self):
+        item_net = _build_net(
+            "item",
+            places=["item_in", "item_out"],
+            transitions={"tau": None},
+            arcs=[
+                ("item_in", "tau"),
+                ("tau", "item_out"),
+            ],
+        )
+        order_net = _build_net(
+            "order",
+            places=["order_in", "order_out"],
+            transitions={"tau": None},
+            arcs=[
+                ("order_in", "tau"),
+                ("tau", "order_out"),
+            ],
+        )
+
+        quality = NetQuality(_build_ocpn({"item": item_net, "order": order_net}))
+
+        self.assertEqual(quality.complexity(), 18)
 
     def test_prepare_log_groups_each_event_once(self):
         ocel = _build_single_type_ocel([
@@ -348,7 +507,7 @@ class NetQualityTests(unittest.TestCase):
             prepared = quality._prepare_log(ocel)
 
         self.assertEqual(len(prepared["events"]), 3)
-        self.assertEqual(group_patch.call_count, 3)
+        self.assertEqual(group_patch.call_count, 5)
 
 
 if __name__ == "__main__":

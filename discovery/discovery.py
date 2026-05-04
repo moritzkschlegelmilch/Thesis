@@ -88,12 +88,23 @@ class ProcessAreaDiscoveryFramework(ABC):
             output_path=output_path,
         )
 
-    def discover_models(self, layer_context=None, show_progress=False):
+    def discover_models(
+        self,
+        layer_context=None,
+        show_progress=False,
+        *,
+        precision_context_sample_size=512,
+        precision_context_depth=5,
+        precision_context_sample_seed=None,
+    ):
         self.activity_to_layer, self.discovered_models = discover_models_for_hierarchy(
             self.ocel,
             self.solution,
             layer_context=layer_context,
             show_progress=show_progress,
+            precision_context_sample_size=precision_context_sample_size,
+            precision_context_depth=precision_context_depth,
+            precision_context_sample_seed=precision_context_sample_seed,
         )
 
     def get_layers(self, show_progress=False):
@@ -101,7 +112,21 @@ class ProcessAreaDiscoveryFramework(ABC):
         self.assign_scores(show_progress=show_progress)
         return self.solve_ilp()
 
-    def run(self, layer_context=None, show_progress=False):
+    def run(
+        self,
+        layer_context=None,
+        show_progress=False,
+        *,
+        precision_context_sample_size=512,
+        precision_context_depth=5,
+        precision_context_sample_seed=None,
+    ):
         self.get_layers(show_progress=show_progress)
-        self.discover_models(layer_context=layer_context, show_progress=show_progress)
+        self.discover_models(
+            layer_context=layer_context,
+            show_progress=show_progress,
+            precision_context_sample_size=precision_context_sample_size,
+            precision_context_depth=precision_context_depth,
+            precision_context_sample_seed=precision_context_sample_seed,
+        )
         return self.solution, self.discovered_models
