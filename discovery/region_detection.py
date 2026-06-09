@@ -34,6 +34,8 @@ class ObjectCentricRegion:
     local_regions: frozenset[LocalRegion]
     activities: frozenset[str]
     id: str | None = None
+    index: int | None = field(default=None, compare=False, hash=False)
+    global_id: str | None = field(default=None, compare=False, hash=False)
     color: str | None = field(default=None, compare=False, hash=False)
     fillcolor: str | None = field(default=None, compare=False, hash=False)
     marker: str | None = field(default=None, compare=False, hash=False)
@@ -47,6 +49,8 @@ class ObjectCentricRegion:
     def __getitem__(self, key):
         mapping = {
             "id": self.id,
+            "index": self.index,
+            "global_id": self.global_id,
             "color": self.color,
             "fillcolor": self.fillcolor,
             "marker": self.marker,
@@ -64,7 +68,7 @@ class ObjectCentricRegion:
         return mapping[key]
 
     def __setitem__(self, key, value):
-        if key in {"id", "color", "fillcolor", "marker"}:
+        if key in {"id", "index", "global_id", "color", "fillcolor", "marker"}:
             object.__setattr__(self, key, value)
             return
         raise KeyError(key)

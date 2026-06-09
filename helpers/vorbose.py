@@ -674,6 +674,60 @@ def _render_model_image_for_hierarchy_row(model_data, object_type_colors, max_si
     )
 
 
+def _subprocess_component_sort_key(component):
+    index = component.get("index")
+    if index is not None:
+        return 0, index
+
+    global_id = component.get("global_id")
+    if global_id is not None:
+        return 1, global_id
+
+    return 2, component.get("id") or ""
+
+
+def _build_indexed_subprocess_highlights(subprocess_components):
+    ordered_components = sorted(
+        subprocess_components or [],
+        key=_subprocess_component_sort_key,
+    )
+    highlight_colors = _build_component_colors(len(ordered_components))
+    highlight_components = []
+
+    for component, color in zip(ordered_components, highlight_colors):
+        component_index = component.get("index")
+        highlight_components.append({
+            "id": component.get("global_id") or component.get("id"),
+            "color": color,
+            "fillcolor": None,
+            "marker": str(component_index) if component_index is not None else None,
+            "transition_keys": component.get("transition_keys", ()),
+            "place_keys": component.get("place_keys", ()),
+            "arc_keys": component.get("arc_keys", ()),
+        })
+
+    return highlight_components
+
+
+def _render_indexed_subprocess_image_for_hierarchy_row(
+        model_data,
+        object_type_colors,
+        max_size=(1400, 700),
+):
+    indexed_highlights = _build_indexed_subprocess_highlights(
+        model_data.get("subprocess_components"),
+    )
+
+    return _render_ocpn_image(
+        model_data.get("ocpn"),
+        max_size=max_size,
+        object_type_colors=object_type_colors,
+        activity_resource_types=model_data.get("activity_resources"),
+        highlighted_activities=model_data.get("highlighted_activities"),
+        subprocess_components=indexed_highlights,
+    )
+
+
 def render_pruning_candidate_debug(
         with_component_ocpn,
         without_component_ocpn,
@@ -962,11 +1016,13 @@ def _draw_object_type_boxes(
         y += box_height + spacing
 
 
-def visualize_hierarchy_with_models(
+def _visualize_hierarchy_with_model_renderer(
         solution,
         discovered_models,
-        title="Hierarchy with Process Models",
+        *,
+        title,
         output_path=None,
+        model_image_renderer,
 ):
     if not solution:
         return None
@@ -1012,7 +1068,7 @@ def visualize_hierarchy_with_models(
         text_height = 40 + label_height + 22 + objects_height + 50
 
         try:
-            model_image = _render_model_image_for_hierarchy_row(
+            model_image = model_image_renderer(
                 model_data,
                 object_type_colors,
                 max_size=(1400, 700),
@@ -1107,3 +1163,33 @@ def visualize_hierarchy_with_models(
         plt.close()
 
     return result
+
+
+def visualize_hierarchy_with_models(
+        solution,
+        discovered_models,
+        title="Hierarchy with Process Models",
+        output_path=None,
+):
+    return _visualize_hierarchy_with_model_renderer(
+        solution,
+        discovered_models,
+        title=title,
+        output_path=output_path,
+        model_image_renderer=_render_model_image_for_hierarchy_row,
+    )
+
+
+def visualize_hierarchy_with_indexed_subprocesses(
+        solution,
+        discovered_models,
+        title="Hierarchy with Indexed Subprocesses",
+        output_path=None,
+):
+    return _visualize_hierarchy_with_model_renderer(
+        solution,
+        discovered_models,
+        title=title,
+        output_path=output_path,
+        model_image_renderer=_render_indexed_subprocess_image_for_hierarchy_row,
+    )

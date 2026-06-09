@@ -5,7 +5,11 @@ import sys
 from .Scorable import Scorable
 from .ilp import solve
 from .discovery_preparation import discover_models_for_hierarchy
-from ..helpers.vorbose import visualize_hierarchy_with_models, visualize_layers_boxed
+from ..helpers.vorbose import (
+    visualize_hierarchy_with_indexed_subprocesses,
+    visualize_hierarchy_with_models,
+    visualize_layers_boxed,
+)
 from tqdm import tqdm
 
 
@@ -84,6 +88,28 @@ class ProcessAreaDiscoveryFramework(ABC):
         return visualize_hierarchy_with_models(
             self.solution,
             self.discovered_models,
+            title=title,
+            output_path=output_path,
+        )
+
+    def visualize_indexed_subprocesses(
+        self,
+        title="Hierarchy with Indexed Subprocesses",
+        output_path=None,
+    ):
+        return visualize_hierarchy_with_indexed_subprocesses(
+            self.solution,
+            self.discovered_models,
+            title=title,
+            output_path=output_path,
+        )
+
+    def visualize_subprocesses(
+        self,
+        title="Hierarchy with Indexed Subprocesses",
+        output_path=None,
+    ):
+        return self.visualize_indexed_subprocesses(
             title=title,
             output_path=output_path,
         )

@@ -1,5 +1,6 @@
 from collections import Counter, defaultdict, deque
 from contextlib import contextmanager
+from dataclasses import is_dataclass, replace
 from itertools import product
 from numbers import Integral
 import random
@@ -481,6 +482,52 @@ def _discover_ocpn_with_subprocess_components(
     return ocpn, subprocess_components
 
 
+def _annotate_subprocess_component_index(component, index):
+    global_id = f"subprocess_{index}"
+
+    if isinstance(component, dict):
+        annotated_component = dict(component)
+        annotated_component["index"] = index
+        annotated_component["global_id"] = global_id
+        return annotated_component
+
+    if is_dataclass(component):
+        dataclass_fields = getattr(component, "__dataclass_fields__", {})
+        updates = {}
+        if "index" in dataclass_fields:
+            updates["index"] = index
+        if "global_id" in dataclass_fields:
+            updates["global_id"] = global_id
+        if updates:
+            return replace(component, **updates)
+
+    return component
+
+
+def _assign_subprocess_indices_across_layers(discovered_models):
+    indexed_models = {}
+    next_index = 1
+
+    for layer in sorted(discovered_models):
+        model_data = dict(discovered_models[layer])
+        original_components = model_data.get("subprocess_components")
+        component_sequence = original_components or ()
+        indexed_components = [
+            _annotate_subprocess_component_index(component, index)
+            for index, component in enumerate(component_sequence, start=next_index)
+        ]
+        next_index += len(indexed_components)
+
+        if isinstance(original_components, tuple):
+            model_data["subprocess_components"] = tuple(indexed_components)
+        else:
+            model_data["subprocess_components"] = indexed_components
+
+        indexed_models[layer] = model_data
+
+    return indexed_models
+
+
 def _discover_ocpn(layer_ocel):
     if layer_ocel.events.empty or layer_ocel.relations.empty:
         return None
@@ -934,76 +981,58 @@ def _reduced_log_enabled_by_original_context(
     }
 
 
-def _reduced_binding_objects_by_type(step, affected_labels, removed_object_types):
-    if step.label not in affected_labels:
-        return tuple(
-            (object_type, tokens)
-            for object_type, tokens in step.objects_by_type
-            if tokens
+def _build_terminal_states_by_context(
+    quality,
+    prepared,
+    selected_contexts=None,
+    *,
+    show_progress=False,
+    progress_desc="Replaying contexts",
+):
+    terminal_states_by_context = {}
+
+    selected_context_set = None if selected_contexts is None else set(selected_contexts)
+    if selected_context_set is None:
+        replay_items = tuple(prepared["replay"].items())
+    else:
+        replay_items = tuple(
+            (ctx, events)
+            for ctx, events in prepared["replay"].items()
+            if ctx in selected_context_set
         )
 
-    return tuple(
-        (object_type, tokens)
-        for object_type, tokens in step.objects_by_type
-        if tokens and object_type not in removed_object_types
-    )
+    if show_progress:
+        replay_items = tqdm(
+            replay_items,
+            total=len(replay_items),
+            desc=progress_desc,
+            leave=False,
+            file=sys.stdout,
+        )
+
+    for ctx, events in replay_items:
+        terminal_states = {}
+        for event in events:
+            for state in quality._replay_terminal_states(event):
+                terminal_states.setdefault(quality._state_key(state), state)
+        terminal_states_by_context[ctx] = tuple(terminal_states.values())
+
+    return terminal_states_by_context
 
 
-def _fire_visible_with_virtual_reduction(
+def _enabled_labels_by_context_from_terminal_states(
     quality,
-    state,
-    step,
-    affected_labels,
-    removed_object_types,
+    terminal_states_by_context,
 ):
-    if step.label not in affected_labels:
-        return quality._fire_visible(state, step)
+    model_enabled = {}
 
-    mc = quality._ensure_model_cache()
-    by_type = mc.visible_transitions_by_label_type.get(step.label)
-    if not by_type:
-        return []
+    for ctx, terminal_states in terminal_states_by_context.items():
+        enabled = set()
+        for state in terminal_states:
+            enabled.update(quality._enabled_labels(state))
+        model_enabled[ctx] = frozenset(enabled)
 
-    reduced_objects_by_type = _reduced_binding_objects_by_type(
-        step,
-        affected_labels,
-        removed_object_types,
-    )
-    if not reduced_objects_by_type:
-        # After removing the current layer's object types, the affected step may
-        # become a no-op on the remaining local nets.
-        return [state]
-
-    objects_by_type = {
-        object_type: tuple(tokens)
-        for object_type, tokens in reduced_objects_by_type
-    }
-    required_types = tuple(sorted(objects_by_type))
-
-    if any(object_type not in by_type for object_type in required_types):
-        return []
-
-    result = []
-    transition_choices = [by_type[object_type] for object_type in required_types]
-
-    for combo in product(*transition_choices):
-        if all(
-            quality._tokens_enabled(state, transition.input_places, objects_by_type[object_type])
-            for object_type, transition in zip(required_types, combo)
-        ):
-            next_state = state
-
-            for object_type, transition in zip(required_types, combo):
-                next_state = quality._move_tokens(
-                    next_state,
-                    transition.input_places,
-                    transition.output_places,
-                    objects_by_type[object_type],
-                )
-
-            result.append(next_state)
-
-    return result
+    return model_enabled
 
 
 def _enabled_labels_with_virtual_reduction(
@@ -1050,72 +1079,6 @@ def _enabled_labels_with_virtual_reduction(
     return enabled_label_cache[cache_key]
 
 
-def _replay_with_virtual_reduction(
-    quality,
-    replay_event,
-    affected_labels,
-    removed_object_types,
-    replay_cache,
-    enabled_label_cache,
-):
-    replay_key = (
-        quality._replay_signature(replay_event),
-        affected_labels,
-        removed_object_types,
-    )
-    if replay_key in replay_cache:
-        return replay_cache[replay_key]
-
-    state = quality._initial_state(replay_event)
-    queue = deque([(state, 0)])
-    visited = set()
-    enabled = set()
-    explored_nodes = 0
-
-    while queue:
-        state, index = queue.popleft()
-        key = (quality._state_key(state), index)
-
-        if key in visited:
-            continue
-
-        if (
-            quality.max_nodes_per_replay is not None
-            and explored_nodes >= quality.max_nodes_per_replay
-        ):
-            break
-
-        visited.add(key)
-        explored_nodes += 1
-
-        if index == len(replay_event.binding_sequence):
-            enabled.update(
-                _enabled_labels_with_virtual_reduction(
-                    quality,
-                    state,
-                    affected_labels,
-                    removed_object_types,
-                    enabled_label_cache,
-                )
-            )
-
-        for next_state in quality._fire_silent(state):
-            queue.append((next_state, index))
-
-        if index < len(replay_event.binding_sequence):
-            for next_state in _fire_visible_with_virtual_reduction(
-                quality,
-                state,
-                replay_event.binding_sequence[index],
-                affected_labels,
-                removed_object_types,
-            ):
-                queue.append((next_state, index + 1))
-
-    replay_cache[replay_key] = frozenset(enabled)
-    return replay_cache[replay_key]
-
-
 def _virtual_reduction_enabled_labels_by_context(precision_bundle, affected_labels):
     affected_labels = frozenset(str(label) for label in affected_labels if label is not None)
     if not affected_labels:
@@ -1126,42 +1089,31 @@ def _virtual_reduction_enabled_labels_by_context(precision_bundle, affected_labe
         return candidate_enabled_cache[affected_labels]
 
     quality = precision_bundle["quality"]
-    prepared = precision_bundle["prepared_original"]
     removed_object_types = precision_bundle["removed_object_types"]
-    replay_cache = {}
     enabled_label_cache = {}
     reduced_enabled_by_context = {}
-    sampled_contexts = precision_bundle.get("sampled_contexts")
     show_progress = precision_bundle.get("show_progress", False)
-
-    replay_items = prepared["replay"].items()
-    if sampled_contexts is not None:
-        sampled_context_set = set(sampled_contexts)
-        replay_items = (
-            (ctx, events)
-            for ctx, events in prepared["replay"].items()
-            if ctx in sampled_context_set
-        )
+    terminal_states_by_context = precision_bundle.get("original_terminal_states_by_context", {})
+    terminal_state_items = tuple(terminal_states_by_context.items())
 
     if show_progress:
-        replay_items = tqdm(
-            tuple(replay_items),
-            total=len(sampled_contexts) if sampled_contexts is not None else len(prepared["replay"]),
-            desc="Replaying reduced precision contexts",
+        terminal_state_items = tqdm(
+            terminal_state_items,
+            total=len(terminal_state_items),
+            desc="Checking reduced precision contexts",
             leave=False,
             file=sys.stdout,
         )
 
-    for ctx, events in replay_items:
+    for ctx, terminal_states in terminal_state_items:
         enabled = set()
-        for replay_event in events:
+        for state in terminal_states:
             enabled.update(
-                _replay_with_virtual_reduction(
+                _enabled_labels_with_virtual_reduction(
                     quality,
-                    replay_event,
+                    state,
                     affected_labels,
                     removed_object_types,
-                    replay_cache,
                     enabled_label_cache,
                 )
             )
@@ -1254,12 +1206,16 @@ def _build_precision_reference_bundle(
             f"depth={'full' if precision_context_depth is None else precision_context_depth}",
             file=sys.stdout,
         )
-    original_enabled_by_context = _build_model_enabled_by_context(
+    original_terminal_states_by_context = _build_terminal_states_by_context(
         quality,
         prepared_original,
         selected_contexts=sampled_contexts if sampled_context_weights is not None else None,
         show_progress=show_progress,
         progress_desc="Replaying precision reference contexts",
+    )
+    original_enabled_by_context = _enabled_labels_by_context_from_terminal_states(
+        quality,
+        original_terminal_states_by_context,
     )
     baseline_enabled_mass = _enabled_mass_by_context(
         context_weights,
@@ -1295,6 +1251,7 @@ def _build_precision_reference_bundle(
         "original_ocel": merged_ocel,
         "reduced_log_ocel": reduced_log_ocel,
         "prepared_original": prepared_original,
+        "original_terminal_states_by_context": original_terminal_states_by_context,
         "original_enabled_by_context": original_enabled_by_context,
         "context_weights": context_weights,
         "baseline_enabled_mass": baseline_enabled_mass,
@@ -1970,7 +1927,7 @@ def _select_best_pruning_candidate(
             #     simplicity_gain,
             #     information_loss,
             # )
-            score = information_loss - simplicity_gain
+            score = simplicity_gain - information_loss
 
             if show_progress:
                 candidate_label = merged_candidate.get("id") or ",".join(
@@ -2203,4 +2160,5 @@ def discover_models_for_hierarchy(
         if layer_progress_bar is not None:
             layer_progress_bar.set_postfix_str(f"Layer {layer}: completed", refresh=False)
 
+    discovered_models = _assign_subprocess_indices_across_layers(discovered_models)
     return dict(activity_to_layer), discovered_models

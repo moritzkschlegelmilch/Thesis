@@ -98,6 +98,7 @@ class NetQuality:
         self._model_cache: _ModelCache | None = None
         self._complexity_cache: float | None = None
         self._replay_cache: dict[tuple, frozenset[str]] = {}
+        self._terminal_replay_cache: dict[tuple, tuple[Any, ...]] = {}
 
     # -------------------------
     # PUBLIC API
@@ -482,16 +483,16 @@ class NetQuality:
     # -------------------------
     # OCPA-STYLE REPLAY
     # -------------------------
-    def _replay(self, ev):
+    def _replay_terminal_states(self, ev):
         replay_key = self._replay_signature(ev)
 
-        if replay_key in self._replay_cache:
-            return self._replay_cache[replay_key]
+        if replay_key in self._terminal_replay_cache:
+            return self._terminal_replay_cache[replay_key]
 
         state = self._initial_state(ev)
         q = deque([(state, 0)])
         visited = set()
-        enabled = set()
+        terminal_states = {}
         explored_nodes = 0
 
         while q:
@@ -510,22 +511,29 @@ class NetQuality:
             visited.add(key)
             explored_nodes += 1
 
-            # If the whole visible preset binding sequence has been replayed,
-            # collect all visible labels enabled from this state. Silent moves
-            # are still explored below, so labels after tau-closure are included.
             if i == len(ev.binding_sequence):
-                enabled |= self._enabled_labels(state)
+                terminal_states.setdefault(key[0], state)
 
-            # OCPA-style interleaving: silent transitions may occur before,
-            # between, and after visible binding steps. They do not consume a
-            # visible binding, so i stays unchanged.
             for ns in self._fire_silent(state):
                 q.append((ns, i))
 
-            # Also try to consume the next visible binding from the preset.
             if i < len(ev.binding_sequence):
                 for ns in self._fire_visible(state, ev.binding_sequence[i]):
                     q.append((ns, i + 1))
+
+        result = tuple(terminal_states.values())
+        self._terminal_replay_cache[replay_key] = result
+        return result
+
+    def _replay(self, ev):
+        replay_key = self._replay_signature(ev)
+
+        if replay_key in self._replay_cache:
+            return self._replay_cache[replay_key]
+
+        enabled = set()
+        for state in self._replay_terminal_states(ev):
+            enabled |= self._enabled_labels(state)
 
         result = frozenset(enabled)
         self._replay_cache[replay_key] = result

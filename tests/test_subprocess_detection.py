@@ -1,6 +1,8 @@
 from contextlib import redirect_stdout
 from io import StringIO
 import os
+import sys
+from types import ModuleType
 import unittest
 from unittest.mock import patch
 
@@ -25,6 +27,7 @@ from repo.discovery.discovery_preparation import (
     _compute_information_loss,
     _compute_simplicity_gain,
     _select_best_pruning_candidate,
+    _virtual_reduction_enabled_labels_by_context,
     clear_ocel_filtering_context_cache,
     discover_models_for_hierarchy,
 )
@@ -40,6 +43,7 @@ from repo.discovery.subprocess_detection import (
 from repo.discovery.totem import clear_totem_cache
 from repo.helpers.vorbose import (
     _build_ocpn_graphviz,
+    _render_indexed_subprocess_image_for_hierarchy_row,
     _render_model_image_for_hierarchy_row,
     render_pruning_candidate_debug,
     render_collapsed_sub_processes,
@@ -822,6 +826,51 @@ class SubprocessDetectionTests(unittest.TestCase):
             frozenset({"x", "y"}),
         )
 
+    def test_virtual_reduction_enabled_labels_by_context_uses_cached_terminal_states(self):
+        state_a = object()
+        state_b = object()
+
+        class _FakeQuality:
+            def _state_key(self, state):
+                return id(state)
+
+        precision_bundle = {
+            "quality": _FakeQuality(),
+            "removed_object_types": frozenset({"item"}),
+            "original_terminal_states_by_context": {
+                "ctx_a": (state_a, state_b),
+                "ctx_b": (state_b,),
+            },
+            "candidate_enabled_cache": {},
+            "show_progress": False,
+        }
+
+        with patch(
+            "repo.discovery.discovery_preparation._enabled_labels_with_virtual_reduction",
+            side_effect=lambda quality, state, affected_labels, removed_object_types, cache: {
+                state_a: frozenset({"x"}),
+                state_b: frozenset({"y"}),
+            }[state],
+        ) as enabled_patch:
+            reduced_enabled = _virtual_reduction_enabled_labels_by_context(
+                precision_bundle,
+                {"x", "y"},
+            )
+            cached_enabled = _virtual_reduction_enabled_labels_by_context(
+                precision_bundle,
+                {"y", "x"},
+            )
+
+        self.assertEqual(
+            reduced_enabled,
+            {
+                "ctx_a": frozenset({"x", "y"}),
+                "ctx_b": frozenset({"y"}),
+            },
+        )
+        self.assertEqual(cached_enabled, reduced_enabled)
+        self.assertEqual(enabled_patch.call_count, 3)
+
     def test_build_precision_reference_bundle_projects_model_to_two_layers(self):
         previous_net = _build_net(
             "order",
@@ -888,8 +937,14 @@ class SubprocessDetectionTests(unittest.TestCase):
                     "replay": {"ctx": [object()]},
                 }
 
-            def _replay(self, event):
+            def _replay_terminal_states(self, event):
+                return ("terminal",)
+
+            def _enabled_labels(self, state):
                 return frozenset({"b"})
+
+            def _state_key(self, state):
+                return state
 
         with patch(
             "repo.discovery.discovery_preparation._build_projected_ocel",
@@ -988,10 +1043,18 @@ class SubprocessDetectionTests(unittest.TestCase):
                     },
                 }
 
-            def _replay(self, event):
+            def _replay_terminal_states(self, event):
                 if event is replay_event_a:
+                    return ("state_a",)
+                return ("state_b",)
+
+            def _enabled_labels(self, state):
+                if state == "state_a":
                     return frozenset({"a"})
                 return frozenset({"b", "c"})
+
+            def _state_key(self, state):
+                return state
 
         with patch(
             "repo.discovery.discovery_preparation._build_projected_ocel",
@@ -1023,6 +1086,10 @@ class SubprocessDetectionTests(unittest.TestCase):
         sample_patch.assert_called_once()
         self.assertEqual(precision_bundle["context_weights"], {"ctx_b": 3})
         self.assertEqual(precision_bundle["sampled_contexts"], ("ctx_b",))
+        self.assertEqual(
+            precision_bundle["original_terminal_states_by_context"],
+            {"ctx_b": ("state_b",)},
+        )
         self.assertEqual(
             precision_bundle["original_enabled_by_context"],
             {"ctx_b": frozenset({"b", "c"})},
@@ -1073,8 +1140,14 @@ class SubprocessDetectionTests(unittest.TestCase):
                     "replay": {"ctx": [object()]},
                 }
 
-            def _replay(self, event):
+            def _replay_terminal_states(self, event):
+                return ("terminal",)
+
+            def _enabled_labels(self, state):
                 return frozenset({"b"})
+
+            def _state_key(self, state):
+                return state
 
         buffer = StringIO()
         with patch(
@@ -1742,6 +1815,81 @@ class SubprocessDetectionTests(unittest.TestCase):
             highlighted_activities=["a"],
         )
 
+    def test_indexed_subprocess_rendering_uses_global_indices_as_markers(self):
+        model_image = Image.new("RGBA", (240, 120), "white")
+        model_data = {
+            "ocpn": {"petri_nets": {"item": (object(), object(), object())}},
+            "subprocess_components": [
+                {
+                    "id": "subprocess_1",
+                    "index": 7,
+                    "global_id": "subprocess_7",
+                    "transition_keys": frozenset({("activity", "a")}),
+                    "place_keys": frozenset(),
+                    "arc_keys": frozenset(),
+                },
+            ],
+            "activity_resources": {"a": ["item"]},
+            "highlighted_activities": ["a"],
+        }
+
+        with patch(
+            "repo.helpers.vorbose._render_ocpn_image",
+            return_value=model_image,
+        ) as render_patch:
+            image = _render_indexed_subprocess_image_for_hierarchy_row(
+                model_data,
+                {"item": "#123abc"},
+            )
+
+        self.assertIs(image, model_image)
+        subprocess_components = render_patch.call_args.kwargs["subprocess_components"]
+        self.assertEqual(len(subprocess_components), 1)
+        self.assertEqual(subprocess_components[0]["id"], "subprocess_7")
+        self.assertEqual(subprocess_components[0]["marker"], "7")
+        self.assertEqual(
+            subprocess_components[0]["transition_keys"],
+            frozenset({("activity", "a")}),
+        )
+
+    def test_process_area_discovery_visualize_indexed_subprocesses_uses_helper(self):
+        fake_pulp = ModuleType("pulp")
+        for attribute in (
+            "LpProblem",
+            "LpVariable",
+            "LpInteger",
+            "value",
+            "LpMinimize",
+            "lpSum",
+            "LpStatus",
+            "PULP_CBC_CMD",
+        ):
+            setattr(fake_pulp, attribute, object())
+
+        with patch.dict(sys.modules, {"pulp": fake_pulp}):
+            from repo.discovery.discovery import ProcessAreaDiscoveryFramework
+
+            discovery = ProcessAreaDiscoveryFramework(None, [])
+            discovery.solution = {"item": 1}
+            discovery.discovered_models = {1: {"subprocess_components": []}}
+
+            with patch(
+                "repo.discovery.discovery.visualize_hierarchy_with_indexed_subprocesses",
+                return_value="visualized",
+            ) as visualize_patch:
+                result = discovery.visualize_indexed_subprocesses(
+                    title="Indexed",
+                    output_path="indexed.png",
+                )
+
+        self.assertEqual(result, "visualized")
+        visualize_patch.assert_called_once_with(
+            discovery.solution,
+            discovery.discovered_models,
+            title="Indexed",
+            output_path="indexed.png",
+        )
+
     def test_render_pruning_candidate_debug_returns_side_by_side_image(self):
         with patch("repo.helpers.vorbose.plt.figure") as figure_patch, patch(
             "repo.helpers.vorbose.plt.imshow"
@@ -2400,6 +2548,66 @@ class SubprocessDetectionTests(unittest.TestCase):
         self.assertEqual(layer_two_model["activities"], ["a", "b", "post", "pre", "review"])
         self.assertNotIn("x", layer_two_model["activities"])
 
+    def test_layer_discovery_assigns_unique_subprocess_indices_across_layers(self):
+        ocel = _FakeInputOCEL(
+            {
+                "order_1": "order",
+                "item_1": "item",
+            },
+            [
+                {"event_id": "e1", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["order_1"]},
+                {"event_id": "e2", "activity": "b", "timestamp": pd.Timestamp("2024-01-01T00:01:00"), "event_objects": ["item_1"]},
+            ],
+        )
+        layer_one_ocel = unittest.mock.Mock()
+        layer_one_ocel.events = pd.DataFrame({"ocel:activity": ["a"]})
+        layer_two_ocel = unittest.mock.Mock()
+        layer_two_ocel.events = pd.DataFrame({"ocel:activity": ["b"]})
+        layer_one_component = {"id": "subprocess_1"}
+        layer_two_component = {"id": "subprocess_1"}
+
+        def build_layer_ocel_side_effect(_, __, ___, selected_object_types, ____):
+            if set(selected_object_types) == {"order"}:
+                return layer_one_ocel, [], ["a"]
+            return layer_two_ocel, [], ["b"]
+
+        def discover_with_components_side_effect(layer_ocel, *_):
+            if layer_ocel is layer_one_ocel:
+                return {"activities": ["a"], "petri_nets": {}}, [layer_one_component]
+            if layer_ocel is layer_two_ocel:
+                return {"activities": ["b"], "petri_nets": {}}, [layer_two_component]
+            raise AssertionError("Unexpected layer OCEL")
+
+        with patch(
+            "repo.discovery.discovery_preparation._build_layer_ocel",
+            side_effect=build_layer_ocel_side_effect,
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_ocpn_with_subprocess_components",
+            side_effect=discover_with_components_side_effect,
+        ), patch(
+            "repo.discovery.discovery_preparation._build_pruning_candidates",
+            return_value=[],
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_activity_resources",
+            return_value={},
+        ):
+            _, discovered_models = discover_models_for_hierarchy(
+                ocel,
+                {"order": 1, "item": 2},
+            )
+
+        layer_one_subprocess = discovered_models[1]["subprocess_components"][0]
+        layer_two_subprocess = discovered_models[2]["subprocess_components"][0]
+
+        self.assertEqual(layer_one_subprocess["id"], "subprocess_1")
+        self.assertEqual(layer_one_subprocess["index"], 1)
+        self.assertEqual(layer_one_subprocess["global_id"], "subprocess_1")
+        self.assertEqual(layer_two_subprocess["id"], "subprocess_1")
+        self.assertEqual(layer_two_subprocess["index"], 2)
+        self.assertEqual(layer_two_subprocess["global_id"], "subprocess_2")
+        self.assertEqual(layer_one_component, {"id": "subprocess_1"})
+        self.assertEqual(layer_two_component, {"id": "subprocess_1"})
+
     def test_layer_discovery_reuses_last_iteration_components(self):
         ocel = _FakeInputOCEL(
             {"item_1": "item"},
@@ -2436,7 +2644,9 @@ class SubprocessDetectionTests(unittest.TestCase):
                 {"item": 1},
             )
 
-        self.assertEqual(discovered_models[1]["subprocess_components"], expected_components)
+        self.assertEqual(discovered_models[1]["subprocess_components"][0]["id"], "subprocess_1")
+        self.assertEqual(discovered_models[1]["subprocess_components"][0]["index"], 1)
+        self.assertEqual(discovered_models[1]["subprocess_components"][0]["global_id"], "subprocess_1")
         discover_patch.assert_called_once()
 
     def test_layer_discovery_progress_mentions_pm4py_and_subprocess_detection(self):
@@ -2481,6 +2691,43 @@ class SubprocessDetectionTests(unittest.TestCase):
         output = buffer.getvalue()
         self.assertIn("PM4Py OCPN discovery", output)
         self.assertIn("subprocess detection", output)
+
+    def test_layer_discovery_limits_processing_to_first_two_layers(self):
+        ocel = _FakeInputOCEL(
+            {
+                "order_1": "order",
+                "item_1": "item",
+                "package_1": "package",
+            },
+            [
+                {"event_id": "e1", "activity": "a", "timestamp": pd.Timestamp("2024-01-01T00:00:00"), "event_objects": ["order_1"]},
+                {"event_id": "e2", "activity": "b", "timestamp": pd.Timestamp("2024-01-01T00:01:00"), "event_objects": ["item_1"]},
+                {"event_id": "e3", "activity": "c", "timestamp": pd.Timestamp("2024-01-01T00:02:00"), "event_objects": ["package_1"]},
+            ],
+        )
+        fake_layer_ocel = unittest.mock.Mock()
+        fake_layer_ocel.events = pd.DataFrame({"ocel:activity": ["a"]})
+        fake_layer_ocel.relations = pd.DataFrame({"ocel:eid": ["e1"]})
+
+        with patch(
+            "repo.discovery.discovery_preparation._build_layer_ocel",
+            return_value=(fake_layer_ocel, [], ["a"]),
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_ocpn_with_subprocess_components",
+            return_value=({"activities": ["a"], "petri_nets": {}}, []),
+        ), patch(
+            "repo.discovery.discovery_preparation._build_pruning_candidates",
+            return_value=[],
+        ), patch(
+            "repo.discovery.discovery_preparation._discover_activity_resources",
+            return_value={},
+        ):
+            _, discovered_models = discover_models_for_hierarchy(
+                ocel,
+                {"order": 1, "item": 2, "package": 3},
+            )
+
+        self.assertEqual(sorted(discovered_models), [1, 2])
 
 
 if __name__ == "__main__":

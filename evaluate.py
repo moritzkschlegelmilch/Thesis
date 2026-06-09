@@ -211,6 +211,7 @@ def _build_summary(
     discovered_models,
     *,
     layers_output=None,
+    subprocess_output=None,
     summary_output=None,
     evaluation=None,
 ):
@@ -241,6 +242,8 @@ def _build_summary(
     }
     if layers_output is not None:
         summary["layers_output"] = str(layers_output)
+    if subprocess_output is not None:
+        summary["subprocess_output"] = str(subprocess_output)
     if summary_output is not None:
         summary["summary_output"] = str(summary_output)
     if evaluation is not None:
@@ -258,6 +261,7 @@ def evaluate_log(
     precision_context_depth=5,
     precision_context_sample_seed=None,
     layers_output=None,
+    subprocess_output=None,
     summary_output=None,
     show_progress=True,
 ):
@@ -271,6 +275,7 @@ def evaluate_log(
     input_path = Path(input_path)
     output_path = Path(output_path)
     layers_output = Path(layers_output) if layers_output is not None else None
+    subprocess_output = Path(subprocess_output) if subprocess_output is not None else None
     summary_output = Path(summary_output) if summary_output is not None else None
     ocel = None
     status_display = _EvaluationStatusDisplay(
@@ -317,17 +322,31 @@ def evaluate_log(
                 title=f"{title or input_path.stem} Layers",
                 output_path=layers_output,
             )
+        if subprocess_output is not None:
+            subprocess_output.parent.mkdir(parents=True, exist_ok=True)
+            discovery.visualize_subprocesses(
+                title=f"{title or input_path.stem} Indexed Subprocesses",
+                output_path=subprocess_output,
+            )
 
         discovery.visualize(
             title=title or input_path.stem,
             output_path=output_path,
         )
         status_display.complete_stage(
-            metrics={"artifacts": 1 + int(layers_output is not None)}
+            metrics={
+                "artifacts": (
+                    1
+                    + int(layers_output is not None)
+                    + int(subprocess_output is not None)
+                )
+            }
         )
         status_display.note(f"Visualization saved to {output_path}")
         if layers_output is not None:
             status_display.note(f"Layer visualization saved to {layers_output}")
+        if subprocess_output is not None:
+            status_display.note(f"Indexed subprocess visualization saved to {subprocess_output}")
 
         evaluation = status_display.finalize(
             stats={
@@ -343,6 +362,7 @@ def evaluate_log(
             solution,
             discovery.discovered_models or {},
             layers_output=layers_output,
+            subprocess_output=subprocess_output,
             summary_output=summary_output,
             evaluation=evaluation,
         )
@@ -403,6 +423,10 @@ def build_parser():
         help="Optional path for a separate layer-only visualization image.",
     )
     parser.add_argument(
+        "--subprocess-output",
+        help="Optional path for a separate indexed-subprocess visualization image.",
+    )
+    parser.add_argument(
         "--summary-output",
         help="Optional path for a JSON summary of the discovered hierarchy.",
     )
@@ -427,6 +451,7 @@ def main(argv=None):
         precision_context_depth=args.precision_context_depth,
         precision_context_sample_seed=args.precision_context_sample_seed,
         layers_output=args.layers_output,
+        subprocess_output=args.subprocess_output,
         summary_output=args.summary_output,
         show_progress=not args.no_progress,
     )
@@ -435,6 +460,8 @@ def main(argv=None):
     print(f"Visualization: {summary['output_path']}")
     if "layers_output" in summary:
         print(f"Layer visualization: {summary['layers_output']}")
+    if "subprocess_output" in summary:
+        print(f"Indexed subprocess visualization: {summary['subprocess_output']}")
     if "summary_output" in summary:
         print(f"Summary JSON: {summary['summary_output']}")
     evaluation = summary.get("evaluation")

@@ -191,6 +191,38 @@ def _build_restrictive_ocpn(object_type="order"):
 
 
 class NetQualityTests(unittest.TestCase):
+    def test_replay_terminal_states_honor_max_nodes_per_replay(self):
+        quality = NetQuality(_build_flower_ocpn(["a"]), max_nodes_per_replay=2)
+        replay_event = _ReplayEvent(
+            context_key=(),
+            binding_sequence=(),
+            context_tokens_by_type=(),
+        )
+        successors_by_state = {
+            "start": ["first", "second"],
+            "first": ["third"],
+            "second": ["fourth"],
+            "third": [],
+            "fourth": [],
+        }
+
+        with mock.patch.object(
+            quality,
+            "_initial_state",
+            return_value="start",
+        ), mock.patch.object(
+            quality,
+            "_state_key",
+            side_effect=lambda state: state,
+        ), mock.patch.object(
+            quality,
+            "_fire_silent",
+            side_effect=lambda state: successors_by_state[state],
+        ):
+            terminal_states = quality._replay_terminal_states(replay_event)
+
+        self.assertEqual(set(terminal_states), {"start", "first"})
+
     def test_replay_honors_max_nodes_per_replay(self):
         quality = NetQuality(_build_flower_ocpn(["a"]), max_nodes_per_replay=2)
         replay_event = _ReplayEvent(

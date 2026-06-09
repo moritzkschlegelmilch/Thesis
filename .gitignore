@@ -1,5 +1,6 @@
 __pycache__/
 *.pyc
+*.log
 example_data/
 example_simulation_data/
 testing_output/
@@ -10,3 +11,5 @@ tests/*
 !tests/test_net_quality.py
 !tests/test_region_detection.py
 heavy_compute/
+simple_logs/
+output/
