@@ -12,14 +12,24 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from pm4py.visualization.ocel.ocpn.variants import wo_decoration
 
-from ..discovery.subprocess_detection import (
-    _arc_key,
-    _build_component_colors,
-    _place_key,
-    _transition_key,
-    collapse_sub_processes,
-)
-from ..discovery.region_detection import build_object_centric_region_highlight
+try:
+    from ..discovery.subprocess_detection import (
+        _arc_key,
+        _build_component_colors,
+        _place_key,
+        _transition_key,
+        collapse_sub_processes,
+    )
+    from ..discovery.region_detection import build_object_centric_region_highlight
+except ImportError:
+    from discovery.subprocess_detection import (
+        _arc_key,
+        _build_component_colors,
+        _place_key,
+        _transition_key,
+        collapse_sub_processes,
+    )
+    from discovery.region_detection import build_object_centric_region_highlight
 
 
 def print_tuple_dict_matrices(push, pull, decimals=4):
@@ -62,8 +72,6 @@ def print_tuple_dict_matrices(push, pull, decimals=4):
 
 if "MPLBACKEND" in os.environ:
     matplotlib.use(os.environ["MPLBACKEND"])
-elif sys.platform == "darwin":
-    matplotlib.use("TkAgg")
 elif os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
     matplotlib.use("TkAgg")
 else:
@@ -387,7 +395,15 @@ def _build_ocpn_graphviz(
     transition_map = {}
     places = {}
 
-    for activity in ocpn["activities"]:
+    visible_activities = set(ocpn.get("activities", ()))
+    for net, _, _ in ocpn.get("petri_nets", {}).values():
+        visible_activities.update(
+            transition.label
+            for transition in net.transitions
+            if transition.label is not None
+        )
+
+    for activity in sorted(visible_activities):
         activities_map[activity] = str(wo_decoration.uuid.uuid4())
         activity_markers = subprocess_styles["transition_markers"].get(("activity", activity), ())
         label = _build_activity_label(
@@ -411,14 +427,18 @@ def _build_ocpn_graphviz(
         _apply_node_border(node_kwargs, _node_border_attributes(activity_colors))
         viz.node(activities_map[activity], **node_kwargs)
 
-    for object_type in ocpn["petri_nets"]:
+    tbr_results = ocpn.get("tbr_results") or {}
+    double_arcs_on_activity = ocpn.get("double_arcs_on_activity") or {}
+
+    for object_type in ocpn.get("petri_nets", {}):
         object_type_color = object_type_colors.get(object_type, wo_decoration.ot_to_color(object_type))
         net, initial_marking, final_marking = ocpn["petri_nets"][object_type]
         place_diagnostics = {}
         transition_diagnostics = {}
-        if object_type in ocpn["tbr_results"]:
-            place_diagnostics = ocpn["tbr_results"][object_type][0]
-            transition_diagnostics = ocpn["tbr_results"][object_type][1]
+        if object_type in tbr_results:
+            place_diagnostics = tbr_results[object_type][0]
+            transition_diagnostics = tbr_results[object_type][1]
+        double_arcs = double_arcs_on_activity.get(object_type, {})
 
         for place in net.places:
             place_id = str(wo_decoration.uuid.uuid4())
@@ -491,8 +511,9 @@ def _build_ocpn_graphviz(
             arc_color = ":".join(arc_colors) if arc_colors else object_type_color
             if isinstance(arc.source, wo_decoration.PetriNet.Place):
                 is_double = (
-                    arc.target.label in ocpn["double_arcs_on_activity"][object_type]
-                    and ocpn["double_arcs_on_activity"][object_type][arc.target.label]
+                    bool(getattr(arc, "variable", False))
+                    or bool(getattr(arc, "properties", {}).get("variable", False))
+                    or bool(double_arcs.get(arc.target.label))
                 )
                 penwidth = 4.0 if is_double else 1.0
                 if arc_colors:
@@ -508,8 +529,9 @@ def _build_ocpn_graphviz(
                 )
             elif isinstance(arc.source, wo_decoration.PetriNet.Transition):
                 is_double = (
-                    arc.source.label in ocpn["double_arcs_on_activity"][object_type]
-                    and ocpn["double_arcs_on_activity"][object_type][arc.source.label]
+                    bool(getattr(arc, "variable", False))
+                    or bool(getattr(arc, "properties", {}).get("variable", False))
+                    or bool(double_arcs.get(arc.source.label))
                 )
                 penwidth = 4.0 if is_double else 1.0
                 if arc_colors:
@@ -1067,17 +1089,24 @@ def _visualize_hierarchy_with_model_renderer(
         label_height = label_bbox[3] - label_bbox[1]
         text_height = 40 + label_height + 22 + objects_height + 50
 
+        render_error = None
         try:
             model_image = model_image_renderer(
                 model_data,
                 object_type_colors,
                 max_size=(1400, 700),
             )
-        except Exception:
+        except Exception as exc:
+            render_error = exc
             model_image = None
 
         if model_image is None:
-            model_image = _placeholder_model_image("No events for this layer")
+            if render_error is None:
+                model_image = _placeholder_model_image("No events for this layer")
+            else:
+                model_image = _placeholder_model_image(
+                    f"Rendering failed: {type(render_error).__name__}: {render_error}"
+                )
 
         max_model_width = max(max_model_width, model_image.width)
         row_height = max(text_height, model_image.height)

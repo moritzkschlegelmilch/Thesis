@@ -1,10 +1,9 @@
 from pulp import LpProblem, LpVariable, LpInteger, value, LpMinimize, lpSum, LpStatus, PULP_CBC_CMD
 
-from repo.helpers.vorbose import print_tuple_dict_matrices
-
 
 def solve(types, scores_push, scores_pull,
           alpha=1.0, beta=1.0, margin_scale=0, verbose=False):
+    types = list(types)
 
     K = len(types)
 
@@ -42,7 +41,18 @@ def solve(types, scores_push, scores_pull,
     )
 
     status = prob.solve(PULP_CBC_CMD(msg=0))
-    solution = {i: int(round(value(z[i]))) for i in types}
+    raw_solution = {
+        i: int(round(value(z[i]) if value(z[i]) is not None else 1))
+        for i in types
+    }
+    layer_mapping = {
+        layer: index + 1
+        for index, layer in enumerate(sorted(set(raw_solution.values())))
+    }
+    solution = {
+        object_type: layer_mapping[layer]
+        for object_type, layer in raw_solution.items()
+    }
 
     if verbose:
         print("Status:", LpStatus[status])

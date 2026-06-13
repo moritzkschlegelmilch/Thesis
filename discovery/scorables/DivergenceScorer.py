@@ -1,13 +1,16 @@
 from collections import defaultdict
 
-from repo.discovery.Scorable import Scorable
-from repo.discovery.totem import _prepare_totem_data, get_all_event_objects
+from ..Scorable import Scorable
+from ..framework import ResourceForces
+from ..layer_assignment import ResourceIndicator
+from ..totem import _prepare_totem_data, get_all_event_objects
 
 
-class DivergenceScorer(Scorable):
+class DivergenceScorer(Scorable, ResourceIndicator):
 
     def __init__(self, eps):
-        super().__init__(eps)
+        Scorable.__init__(self, eps)
+        ResourceIndicator.__init__(self, weight=eps)
         self.divergence_relations = {}
         self.type_to_type = {}
         self.type_to_object = {}
@@ -92,3 +95,9 @@ class DivergenceScorer(Scorable):
     def get_divergence_ratio(self, o_1, o_2) -> float:
         total_targets = len(self.type_to_object.get(o_2, ()))
         return len(self.divergence_relations.get((o_1, o_2), set())) / total_targets
+
+    def score(self, source_type: str, target_type: str) -> ResourceForces:
+        return ResourceForces(
+            push=self.assign_score_push(source_type, target_type),
+            pull=self.assign_score_pull(source_type, target_type),
+        )

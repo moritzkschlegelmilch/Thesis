@@ -137,7 +137,7 @@ class _ObjectTypeContext:
 @dataclass(frozen=True)
 class _ObligationGraph:
     adjacency: dict[Any, frozenset[Any]]
-    obligation_nodes: frozenset[tuple[str, str]]
+    obligation_nodes: frozenset[Any]
 
 
 def detect_object_centric_regions(ocpn, allowed_activities=None):
@@ -153,20 +153,23 @@ def detect_object_centric_regions(ocpn, allowed_activities=None):
         for object_type, (net, _, _) in petri_nets.items()
     }
     allowed_activities = _normalize_allowed_activities(contexts, allowed_activities)
-    activity_to_object_types = _build_activity_to_object_types(contexts)
-
+    blocked_transitions = frozenset(
+        transition
+        for context in contexts.values()
+        for transition in context.transitions
+        if transition.label is not None
+        and transition.label not in allowed_activities
+    )
     local_regions = set()
     for object_type, context in contexts.items():
-        blocked_activities = context.visible_labels - allowed_activities
         local_regions.update(
-            _maximal_regions_avoiding_labels(context, blocked_activities)
+            _maximal_regions_avoiding_transitions(context, blocked_transitions)
         )
 
     output_regions = _resolve_region_set(
         frozenset(local_regions),
-        frozenset(),
+        blocked_transitions,
         contexts,
-        activity_to_object_types,
     )
     output_regions = _remove_duplicate_and_contained_outputs(output_regions)
     output_regions = _remove_trivial_regions(output_regions)
@@ -362,6 +365,15 @@ def _maximal_regions_avoiding_labels(context, blocked_activities):
         for transition in context.transitions
         if transition.label is not None and transition.label in blocked_activities
     }
+    return _maximal_regions_avoiding_transitions(context, forbidden_transitions)
+
+
+def _maximal_regions_avoiding_transitions(context, blocked_transitions):
+    forbidden_transitions = {
+        transition
+        for transition in context.transitions
+        if transition in blocked_transitions
+    }
     return _maximal_regions_inside_universe(
         context,
         context.vertices,
@@ -504,31 +516,68 @@ def _keep_only_inclusion_maximal_regions_of_same_type(regions):
     return frozenset(maximal_regions)
 
 
-def _build_obligation_graph(regions, activity_to_object_types):
+def _build_obligation_graph(regions, contexts):
     adjacency = defaultdict(set)
     obligation_nodes = set()
 
     for region in regions:
         adjacency.setdefault(region, set())
 
-    visible_activities = sorted({
-        activity
-        for region in regions
-        for activity in region.activities
-    })
-    for activity in visible_activities:
-        adjacency.setdefault(activity, set())
-        for object_type in sorted(activity_to_object_types.get(activity, ())):
-            obligation_node = (activity, object_type)
-            obligation_nodes.add(obligation_node)
-            adjacency.setdefault(obligation_node, set())
-            adjacency[activity].add(obligation_node)
-            adjacency[obligation_node].add(activity)
+    transition_nodes = []
+    seen_transition_nodes = set()
+    for region in regions:
+        for vertex in region.internal:
+            if not isinstance(vertex, PetriNet.Transition):
+                continue
+            transition_node = _transition_graph_node(region.object_type, vertex)
+            if transition_node in seen_transition_nodes:
+                continue
+            seen_transition_nodes.add(transition_node)
+            transition_nodes.append(transition_node)
+
+    transition_nodes.sort(key=_sort_graph_node)
+    for transition_node in transition_nodes:
+        adjacency.setdefault(transition_node, set())
+
+    for transition_node in transition_nodes:
+        transitions_with_context = _transitions_with_context_for_graph_node(
+            transition_node,
+            regions,
+            contexts,
+        )
+        for object_type, transition in transitions_with_context:
+            for place in sorted(_transition_places(transition, "in"), key=_sort_petri_net_node):
+                obligation_node = ("obligation", transition_node, object_type, transition, place, "in")
+                obligation_nodes.add(obligation_node)
+                adjacency[transition_node].add(obligation_node)
+                adjacency[obligation_node].add(transition_node)
+            for place in sorted(_transition_places(transition, "out"), key=_sort_petri_net_node):
+                obligation_node = ("obligation", transition_node, object_type, transition, place, "out")
+                obligation_nodes.add(obligation_node)
+                adjacency[transition_node].add(obligation_node)
+                adjacency[obligation_node].add(transition_node)
 
     for region in regions:
-        for activity in region.activities:
-            obligation_node = (activity, region.object_type)
-            adjacency.setdefault(obligation_node, set())
+        compensation_places = {
+            "in": {
+                vertex
+                for vertex in region.vertices
+                if isinstance(vertex, PetriNet.Place)
+                and vertex is not region.target
+            },
+            "out": {
+                vertex
+                for vertex in region.vertices
+                if isinstance(vertex, PetriNet.Place)
+                and vertex is not region.source
+            },
+        }
+        for obligation_node in obligation_nodes:
+            _, _, object_type, _, place, direction = obligation_node
+            if object_type != region.object_type:
+                continue
+            if place not in compensation_places[direction]:
+                continue
             adjacency[region].add(obligation_node)
             adjacency[obligation_node].add(region)
 
@@ -541,10 +590,68 @@ def _build_obligation_graph(regions, activity_to_object_types):
     )
 
 
+def _transitions_with_context_for_graph_node(transition_node, regions, contexts):
+    if transition_node[1] == "visible":
+        label = transition_node[2]
+        return tuple(sorted(
+            (
+                (object_type, transition)
+                for object_type, context in contexts.items()
+                for transition in context.transitions
+                if transition.label is not None
+                and str(transition.label) == label
+            ),
+            key=lambda item: (item[0], _sort_vertex(item[1])),
+        ))
+
+    object_type = transition_node[2]
+    transition = transition_node[3]
+    if any(
+        region.object_type == object_type
+        and transition in region.internal
+        for region in regions
+    ):
+        return ((object_type, transition),)
+    return ()
+
+
+def _transition_places(transition, direction):
+    if direction == "in":
+        return {
+            arc.source
+            for arc in transition.in_arcs
+            if isinstance(arc.source, PetriNet.Place)
+        }
+    return {
+        arc.target
+        for arc in transition.out_arcs
+        if isinstance(arc.target, PetriNet.Place)
+    }
+
+
+def _transition_graph_node(object_type, transition):
+    if transition.label is not None:
+        return ("transition", "visible", str(transition.label))
+    return ("transition", "silent", object_type, transition)
+
+
+def _transitions_for_graph_node(transition_node, fallback_transition, contexts):
+    if transition_node[1] == "visible":
+        label = transition_node[2]
+        return frozenset(
+            transition
+            for context in contexts.values()
+            for transition in context.transitions
+            if transition.label is not None
+            and str(transition.label) == label
+        )
+    return frozenset({fallback_transition})
+
+
 def _open_obligation_nodes(graph):
     return [
         obligation_node
-        for obligation_node in sorted(graph.obligation_nodes)
+        for obligation_node in sorted(graph.obligation_nodes, key=_sort_graph_node)
         if all(
             not isinstance(neighbor, LocalRegion)
             for neighbor in graph.adjacency.get(obligation_node, ())
@@ -552,32 +659,47 @@ def _open_obligation_nodes(graph):
     ]
 
 
-def _prune_unsupported_activities(regions, blocked_activities, contexts, activity_to_object_types):
+def _prune_unsupported_transitions(regions, blocked_transitions, contexts):
     current_regions = frozenset(regions)
-    current_blocked_activities = frozenset(blocked_activities)
+    current_blocked_transitions = frozenset(blocked_transitions)
 
     while True:
-        graph = _build_obligation_graph(current_regions, activity_to_object_types)
+        graph = _build_obligation_graph(current_regions, contexts)
         open_obligation_nodes = _open_obligation_nodes(graph)
         if not open_obligation_nodes:
-            return current_regions, current_blocked_activities, graph
+            return current_regions, current_blocked_transitions, graph
 
-        activity, _ = open_obligation_nodes[0]
-        current_blocked_activities = current_blocked_activities | {activity}
+        _, transition_node, _, transition, _, _ = open_obligation_nodes[0]
+        current_blocked_transitions = current_blocked_transitions | _transitions_for_graph_node(
+            transition_node,
+            transition,
+            contexts,
+        )
         current_regions = _keep_only_inclusion_maximal_regions_of_same_type(
-            _replace_regions_avoiding_labels(
+            _replace_regions_avoiding_transitions(
                 current_regions,
-                current_blocked_activities,
+                current_blocked_transitions,
                 contexts,
             )
         )
 
 
 def _replace_regions_avoiding_labels(regions, blocked_activities, contexts):
+    blocked_transitions = frozenset(
+        transition
+        for context in contexts.values()
+        for transition in context.transitions
+        if transition.label is not None
+        and transition.label in blocked_activities
+    )
+    return _replace_regions_avoiding_transitions(regions, blocked_transitions, contexts)
+
+
+def _replace_regions_avoiding_transitions(regions, blocked_transitions, contexts):
     replacement_regions = set()
 
     for region in regions:
-        if not region.activities & blocked_activities:
+        if not (region.internal & blocked_transitions):
             replacement_regions.add(region)
             continue
 
@@ -587,8 +709,7 @@ def _replace_regions_avoiding_labels(regions, blocked_activities, contexts):
             vertex
             for vertex in universe
             if isinstance(vertex, PetriNet.Transition)
-            and vertex.label is not None
-            and vertex.label in blocked_activities
+            and vertex in blocked_transitions
         }
         replacement_regions.update(
             _maximal_regions_inside_universe(
@@ -601,12 +722,11 @@ def _replace_regions_avoiding_labels(regions, blocked_activities, contexts):
     return frozenset(replacement_regions)
 
 
-def _resolve_region_set(regions, blocked_activities, contexts, activity_to_object_types):
-    pruned_regions, blocked_activities, graph = _prune_unsupported_activities(
+def _resolve_region_set(regions, blocked_transitions, contexts):
+    pruned_regions, blocked_transitions, graph = _prune_unsupported_transitions(
         regions,
-        blocked_activities,
+        blocked_transitions,
         contexts,
-        activity_to_object_types,
     )
     if not pruned_regions:
         return frozenset()
@@ -625,7 +745,7 @@ def _resolve_region_set(regions, blocked_activities, contexts, activity_to_objec
         if not component_regions:
             continue
 
-        if _has_at_most_one_region_per_object_type(component_regions):
+        if _same_type_regions_are_componentwise_disjoint(component_regions):
             output_regions.add(_make_output_region(component_regions))
             continue
 
@@ -639,9 +759,8 @@ def _resolve_region_set(regions, blocked_activities, contexts, activity_to_objec
             output_regions.update(
                 _resolve_region_set(
                     (component_regions - conflicting_regions) | {selected_region},
-                    blocked_activities,
+                    blocked_transitions,
                     contexts,
-                    activity_to_object_types,
                 )
             )
 
@@ -655,6 +774,23 @@ def _has_at_most_one_region_per_object_type(regions):
         if counts[region.object_type] > 1:
             return False
     return True
+
+
+def _same_type_regions_are_componentwise_disjoint(regions):
+    regions_by_type = defaultdict(list)
+    for region in regions:
+        regions_by_type[region.object_type].append(region)
+
+    for same_type_regions in regions_by_type.values():
+        for left_index, left_region in enumerate(same_type_regions):
+            for right_region in same_type_regions[left_index + 1:]:
+                if not _local_regions_are_componentwise_disjoint(left_region, right_region):
+                    return False
+    return True
+
+
+def _local_regions_are_componentwise_disjoint(left_region, right_region):
+    return not (left_region.vertices & right_region.vertices)
 
 
 def _choose_conflicting_object_type(regions):
@@ -727,6 +863,15 @@ def _count_region_transitions(region):
     )
 
 
+def _count_region_visible_transitions(region):
+    return sum(
+        1
+        for _, vertex in region.internal
+        if isinstance(vertex, PetriNet.Transition)
+        and vertex.label is not None
+    )
+
+
 def _output_region_is_contained_in(region, other_region):
     region_vertices = region.source | region.internal | region.target
     other_region_vertices = other_region.source | other_region.internal | other_region.target
@@ -790,11 +935,17 @@ def _sort_vertex(vertex):
 def _sort_graph_node(node):
     if isinstance(node, LocalRegion):
         return 0, _sort_local_region_key(node)
+    if isinstance(node, tuple) and len(node) == 3 and node[0] == "transition":
+        return 1, node[1], node[2]
+    if isinstance(node, tuple) and len(node) == 4 and node[0] == "transition":
+        return 2, node[1], node[2], _sort_vertex(node[3])
+    if isinstance(node, tuple) and len(node) == 6 and node[0] == "obligation":
+        return 3, _sort_graph_node(node[1]), node[2], _sort_vertex(node[3]), _sort_petri_net_node(node[4]), node[5]
     if isinstance(node, tuple) and len(node) == 2:
-        return 1, node
+        return 4, tuple(str(part) for part in node)
     if isinstance(node, str):
-        return 2, node
-    return 3, repr(node)
+        return 5, node
+    return 6, repr(node)
 
 
 def _sort_local_region_key(region):

@@ -1,15 +1,18 @@
-from repo.discovery.Scorable import Scorable
-from repo.discovery.totem import _prepare_totem_data
+from ..Scorable import Scorable
+from ..framework import ResourceForces
+from ..layer_assignment import ResourceIndicator
+from ..totem import _prepare_totem_data
 
 TR_TOTAL = "total"
 TR_DEPENDENT = "D"
 TR_INITIATING = "I"
 
 
-class TimeRelationScorer(Scorable):
+class TimeRelationScorer(Scorable, ResourceIndicator):
 
     def __init__(self, eps):
-        super().__init__(eps)
+        Scorable.__init__(self, eps)
+        ResourceIndicator.__init__(self, weight=eps)
         self.temporal_relations = None
 
     def prepare(self, ocel):
@@ -83,3 +86,9 @@ class TimeRelationScorer(Scorable):
         temp_r_reverse.setdefault("D", 0)
 
         return (temp_r_reverse["D"] - temp_r["D"]) / temp_r["total"]
+
+    def score(self, source_type: str, target_type: str) -> ResourceForces:
+        return ResourceForces(
+            push=self.assign_score_push(source_type, target_type),
+            pull=self.assign_score_pull(source_type, target_type),
+        )

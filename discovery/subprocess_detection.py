@@ -685,6 +685,8 @@ def _clone_ocpn(ocpn):
                 weight=getattr(arc, "weight", 1),
             )
             cloned_arc.properties.update(getattr(arc, "properties", {}))
+            if _arc_has_variable_marker(arc):
+                _mark_arc_variable(cloned_arc)
 
         cloned_petri_nets[object_type] = (
             cloned_net,
@@ -706,10 +708,48 @@ def _clone_ocpn(ocpn):
     })
     cloned_ocpn["tbr_results"] = {}
     cloned_ocpn["double_arcs_on_activity"] = {
-        object_type: {}
+        object_type: dict(ocpn.get("double_arcs_on_activity", {}).get(object_type, {}))
         for object_type in cloned_petri_nets
     }
     return cloned_ocpn, node_maps
+
+
+def _arc_has_variable_marker(arc):
+    return bool(
+        getattr(arc, "variable", False)
+        or getattr(arc, "properties", {}).get("variable", False)
+    )
+
+
+def _mark_arc_variable(arc):
+    try:
+        setattr(arc, "variable", True)
+    except Exception:
+        pass
+    try:
+        arc.properties["variable"] = True
+    except Exception:
+        pass
+
+
+def _is_variable_arc(ocpn, object_type, arc):
+    if _arc_has_variable_marker(arc):
+        return True
+
+    transition = None
+    if isinstance(arc.source, PetriNet.Transition):
+        transition = arc.source
+    elif isinstance(arc.target, PetriNet.Transition):
+        transition = arc.target
+
+    if transition is None or transition.label is None:
+        return False
+
+    return bool(
+        ocpn.get("double_arcs_on_activity", {})
+        .get(object_type, {})
+        .get(str(transition.label), False)
+    )
 
 
 def _component_boundary_places(component):
@@ -793,6 +833,18 @@ def collapse_sub_processes(ocpn, subprocess_components):
                 local_region.target
                 for local_region in local_regions
             }
+            variable_input_places_original = set()
+            variable_output_places_original = set()
+            for local_region in local_regions:
+                contains_variable_arc = any(
+                    _is_variable_arc(ocpn, object_type, arc)
+                    for vertex in local_region.internal
+                    if isinstance(vertex, PetriNet.Transition)
+                    for arc in tuple(vertex.in_arcs) + tuple(vertex.out_arcs)
+                )
+                if contains_variable_arc:
+                    variable_input_places_original.add(local_region.source)
+                    variable_output_places_original.add(local_region.target)
 
             transitions_to_remove = [
                 cloned_transition
@@ -840,10 +892,24 @@ def collapse_sub_processes(ocpn, subprocess_components):
                 component.id,
             )
             net.transitions.add(collapsed_transition)
+            variable_input_places = {
+                original_place_map[place]
+                for place in variable_input_places_original
+                if place in original_place_map
+            }
+            variable_output_places = {
+                original_place_map[place]
+                for place in variable_output_places_original
+                if place in original_place_map
+            }
             for place in input_places:
-                petri_utils.add_arc_from_to(place, collapsed_transition, net)
+                arc = petri_utils.add_arc_from_to(place, collapsed_transition, net)
+                if place in variable_input_places:
+                    _mark_arc_variable(arc)
             for place in output_places:
-                petri_utils.add_arc_from_to(collapsed_transition, place, net)
+                arc = petri_utils.add_arc_from_to(collapsed_transition, place, net)
+                if place in variable_output_places:
+                    _mark_arc_variable(arc)
 
             inserted_transitions.add((object_type, collapsed_transition))
             cloned_ocpn["petri_nets"][object_type] = (

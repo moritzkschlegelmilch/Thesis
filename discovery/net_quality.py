@@ -258,7 +258,7 @@ class NetQuality:
         return self._model_cache
 
     def _is_variable_arc(self, object_type: str, arc) -> bool:
-        if bool(getattr(arc, "variable", False)):
+        if bool(getattr(arc, "variable", False)) or bool(getattr(arc, "properties", {}).get("variable", False)):
             return True
 
         transition = None

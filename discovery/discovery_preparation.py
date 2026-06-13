@@ -293,6 +293,20 @@ def _discover_activity_resources(event_records, object_to_type, solution, refere
 
 
 def _construct_ocel(event_rows, object_rows, relation_rows, o2o_rows):
+    event_rows = [
+        {
+            **row,
+            "ocel:timestamp": _normalize_pm4py_timestamp(row.get("ocel:timestamp")),
+        }
+        for row in event_rows
+    ]
+    relation_rows = [
+        {
+            **row,
+            "ocel:timestamp": _normalize_pm4py_timestamp(row.get("ocel:timestamp")),
+        }
+        for row in relation_rows
+    ]
     o2o_df = pd.DataFrame(
         o2o_rows,
         columns=["ocel:oid", "ocel:oid_2", "ocel:qualifier"],
@@ -336,6 +350,16 @@ def _construct_ocel(event_rows, object_rows, relation_rows, o2o_rows):
         )
 
     return built_ocel
+
+
+def _normalize_pm4py_timestamp(timestamp):
+    if timestamp is None or pd.isna(timestamp):
+        return pd.NaT
+    if isinstance(timestamp, pd.Timestamp):
+        return timestamp
+    if isinstance(timestamp, (int, float)):
+        return pd.to_datetime(timestamp, unit="s")
+    return pd.to_datetime(timestamp)
 
 
 def _build_projected_ocel(
@@ -551,7 +575,7 @@ def _component_transition_count(component):
         return 0
     if hasattr(component, "get"):
         return len(component.get("transition_keys", ()))
-    return len(component.get("transition_keys", ()))
+    return len(getattr(component, "transition_keys", ()))
 
 
 def _component_place_count(component):
@@ -559,7 +583,7 @@ def _component_place_count(component):
         return 0
     if hasattr(component, "get"):
         return len(component.get("place_keys", ()))
-    return len(component.get("place_keys", ()))
+    return len(getattr(component, "place_keys", ()))
 
 
 def _component_boundary_adjacent_activities(component, activity_to_layer, reference_layer):
@@ -1396,7 +1420,7 @@ def _compute_simplicity_gain_from_prepared_context(prepared_context, component):
 
 
 def _is_variable_arc(ocpn, object_type, arc):
-    if bool(getattr(arc, "variable", False)):
+    if bool(getattr(arc, "variable", False)) or bool(getattr(arc, "properties", {}).get("variable", False)):
         return True
 
     transition = None

@@ -1,7 +1,9 @@
-from repo.discovery.scorables.CardinalityRelationScorer import CardinalityRelationScorer
-from repo.discovery.scorables.DivergenceScorer import DivergenceScorer
-from repo.discovery.scorables.TimeRelationScorer import TimeRelationScorer
-from repo.discovery.discovery import ProcessAreaDiscoveryFramework
+from .discovery import ProcessAreaDiscoveryFramework
+from .scorables import (
+    CardinalityRelationScorer,
+    DivergenceScorer,
+    TimeRelationScorer,
+)
 
 
 class ProcessAreaDiscovery(ProcessAreaDiscoveryFramework):

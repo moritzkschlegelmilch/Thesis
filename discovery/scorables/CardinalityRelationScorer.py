@@ -1,86 +1,155 @@
 from collections import defaultdict
+from math import log2
 
-from repo.discovery.Scorable import Scorable
-from repo.discovery.totem import _prepare_totem_data
-
-LC_TOTAL = "total"
-LC_CONSTANT = "constant"
-LC_MANY = "other"
+from ..Scorable import Scorable
+from ..framework import ResourceForces
+from ..layer_assignment import ResourceIndicator
+from ..totem import get_all_event_objects
 
 
-class CardinalityRelationScorer(Scorable):
+class CardinalityRelationScorer(Scorable, ResourceIndicator):
 
     def __init__(self, eps):
-        super().__init__(eps)
-        self.cardinality_relations = None
+        Scorable.__init__(self, eps)
+        ResourceIndicator.__init__(self, weight=eps)
+        self.normalized_entropy = {}
+        self.type_to_object = {}
 
     def prepare(self, ocel):
-        _, _, o2o, type_to_object = _prepare_totem_data(ocel)
-
-        h_log_cardinalities: dict[tuple[str, str], dict[str, int]] = {}
+        o2o, type_to_object = _build_event_derived_o2o(ocel)
+        self.type_to_object = type_to_object
+        normalized_entropy = {}
 
         for source_type in ocel.object_types:
+            source_objects = type_to_object.get(source_type, set())
+            source_count = len(source_objects)
             for target_type in ocel.object_types:
-                pair = (source_type, target_type)
-                bilateral_cardinality_counts = defaultdict(int)
-                total = 0
+                cardinality_counts = defaultdict(int)
+                for source_obj in source_objects:
+                    cardinality = len(o2o.get(source_obj, {}).get(target_type, set()))
+                    cardinality_counts[cardinality] += 1
 
-                for source_obj in type_to_object.get(source_type, set()):
-                    total += 1
-                    target_objects = o2o.get(source_obj, {}).get(target_type, set())
-                    forward_cardinality = len(target_objects)
-                    if forward_cardinality > 0:
-                        reverse_cardinalities = tuple(sorted(
-                            len(o2o.get(target_obj, {}).get(source_type, set()))
-                            for target_obj in target_objects
-                        ))
-                        bilateral_signature = (forward_cardinality, reverse_cardinalities)
-                        bilateral_cardinality_counts[bilateral_signature] += 1
-
-                h_log_cardinalities[pair] = {LC_TOTAL: total}
-                if total == 0 or not bilateral_cardinality_counts:
-                    h_log_cardinalities[pair][LC_CONSTANT] = 0
-                    h_log_cardinalities[pair][LC_MANY] = total
-                    continue
-
-                dominant_signature = max(
-                    bilateral_cardinality_counts,
-                    key=lambda signature: (
-                        bilateral_cardinality_counts[signature],
-                        -signature[0],
-                        tuple(-value for value in signature[1]),
-                    ),
+                normalized_entropy[(source_type, target_type)] = _normalized_entropy(
+                    cardinality_counts,
+                    source_count,
                 )
-                constant_count = bilateral_cardinality_counts[dominant_signature]
-                h_log_cardinalities[pair][LC_CONSTANT] = constant_count
-                h_log_cardinalities[pair][LC_MANY] = total - constant_count
 
-        self.cardinality_relations = h_log_cardinalities
+        self.normalized_entropy = normalized_entropy
 
     def assign_score_pull(self, o_1, o_2) -> float:
-        temp_r = self.cardinality_relations[o_1, o_2]
-        temp_r_reverse = self.cardinality_relations[o_2, o_1]
-
-        # if they are not related from o_1's perspective, then also not from o_2's perspective
-        if LC_TOTAL not in temp_r or temp_r[LC_TOTAL] == 0:
+        entropy_forward = self.normalized_entropy.get((o_1, o_2), 0.0)
+        entropy_reverse = self.normalized_entropy.get((o_2, o_1), 0.0)
+        if entropy_forward + entropy_reverse == 0:
             return 0
 
-        temp_r.setdefault(LC_CONSTANT, 0)
-        temp_r_reverse.setdefault(LC_CONSTANT, 0)
-
-        return (
-            temp_r[LC_CONSTANT] + temp_r_reverse[LC_CONSTANT]
-        ) / (temp_r[LC_TOTAL] + temp_r_reverse[LC_TOTAL])
+        harmonic_mean = (
+            2 * entropy_forward * entropy_reverse
+        ) / (
+            entropy_forward + entropy_reverse
+        )
+        return harmonic_mean ** 2
 
     def assign_score_push(self, o_1, o_2) -> float:
-        temp_r = self.cardinality_relations[o_1, o_2]
-        temp_r_reverse = self.cardinality_relations[o_2, o_1]
+        return (
+            self.normalized_entropy.get((o_2, o_1), 0.0)
+            - self.normalized_entropy.get((o_1, o_2), 0.0)
+        )
 
-        # if they are not related from o_1's perspective, then also not from o_2's perspective
-        if LC_TOTAL not in temp_r or temp_r[LC_TOTAL] == 0:
-            return 0
+    def score(self, source_type: str, target_type: str) -> ResourceForces:
+        return ResourceForces(
+            push=self.assign_score_push(source_type, target_type),
+            pull=self.assign_score_pull(source_type, target_type),
+        )
 
-        temp_r.setdefault(LC_MANY, 0)
-        temp_r_reverse.setdefault(LC_MANY, 0)
 
-        return (temp_r[LC_MANY] / temp_r[LC_TOTAL]) - (temp_r_reverse[LC_MANY] / temp_r_reverse[LC_TOTAL])
+def _normalized_entropy(cardinality_counts, object_count):
+    if object_count <= 1:
+        return 0.0
+
+    entropy = 0.0
+    for count in cardinality_counts.values():
+        probability = count / object_count
+        if probability > 0:
+            entropy -= probability * log2(probability)
+
+    upper_entropy = log2(object_count)
+    if upper_entropy == 0:
+        return 0.0
+    return entropy / upper_entropy
+
+
+def _build_event_derived_o2o(ocel):
+    object_to_type = _extract_object_to_type(ocel)
+    type_to_object = defaultdict(set)
+    o2o = defaultdict(lambda: defaultdict(set))
+
+    event_ids = list(_event_ids(ocel))
+    for event_id in event_ids:
+        event_objects = [
+            obj
+            for obj in _event_objects(ocel, event_id)
+            if obj in object_to_type
+        ]
+        objects_by_type = defaultdict(set)
+        for obj in event_objects:
+            object_type = object_to_type[obj]
+            type_to_object[object_type].add(obj)
+            objects_by_type[object_type].add(obj)
+
+        for source_obj in event_objects:
+            source_type = object_to_type[source_obj]
+            type_to_object[source_type].add(source_obj)
+            for target_type, target_objects in objects_by_type.items():
+                o2o[source_obj][target_type].update(
+                    target_obj
+                    for target_obj in target_objects
+                    if target_obj != source_obj
+                )
+
+    return {
+        source_obj: dict(targets_by_type)
+        for source_obj, targets_by_type in o2o.items()
+    }, {
+        object_type: set(objects)
+        for object_type, objects in type_to_object.items()
+    }
+
+
+def _extract_object_to_type(ocel):
+    objects_df = getattr(ocel, "objects", None)
+    if objects_df is not None:
+        if {"ocel:oid", "ocel:type"} <= set(getattr(objects_df, "columns", ())):
+            return dict(zip(objects_df["ocel:oid"], objects_df["ocel:type"]))
+        if {"_objId", "_objType"} <= set(getattr(objects_df, "columns", ())):
+            return dict(zip(objects_df["_objId"], objects_df["_objType"]))
+
+    object_to_type = {}
+    for event_id in _event_ids(ocel):
+        for object_type in ocel.object_types:
+            for obj in ocel.get_event_objects_by_type(event_id, object_type):
+                object_to_type[obj] = object_type
+    return object_to_type
+
+
+def _event_ids(ocel):
+    events_df = getattr(ocel, "events", None)
+    if events_df is not None:
+        if "_eventId" in events_df.columns:
+            return events_df["_eventId"]
+        if "ocel:eid" in events_df.columns:
+            return events_df["ocel:eid"]
+        event_id_column = getattr(ocel, "event_id_column", None)
+        if event_id_column is not None and event_id_column in events_df.columns:
+            return events_df[event_id_column]
+    return ()
+
+
+def _event_objects(ocel, event_id):
+    relations_df = getattr(ocel, "relations", None)
+    if relations_df is not None and {"ocel:eid", "ocel:oid"} <= set(getattr(relations_df, "columns", ())):
+        return tuple(relations_df.loc[relations_df["ocel:eid"] == event_id, "ocel:oid"])
+
+    try:
+        return tuple(get_all_event_objects(ocel, event_id))
+    except Exception:
+        return ()
