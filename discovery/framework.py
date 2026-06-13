@@ -135,6 +135,7 @@ class AdvancedProcessArea:
 @dataclass
 class AdvancedProcessAreaHierarchy:
     areas: tuple[AdvancedProcessArea, ...] = ()
+    layer_assignment: LayerAssignment | None = None
 
     def object_types(self) -> frozenset[str]:
         return frozenset(
@@ -151,7 +152,10 @@ class AdvancedProcessAreaHierarchy:
         )
 
     def append(self, area: AdvancedProcessArea) -> "AdvancedProcessAreaHierarchy":
-        return AdvancedProcessAreaHierarchy(self.areas + (area,))
+        return AdvancedProcessAreaHierarchy(
+            self.areas + (area,),
+            layer_assignment=self.layer_assignment,
+        )
 
 
 @dataclass(frozen=True)

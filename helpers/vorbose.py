@@ -99,7 +99,68 @@ def _show_current_figure():
         plt.show()
 
 
-def visualize_layers_boxed(solution, title="Hierarchy Layers", output_path=None):
+def _object_to_layer_mapping(layer_assignment_or_solution):
+    if hasattr(layer_assignment_or_solution, "layer_assignment"):
+        layer_assignment = getattr(layer_assignment_or_solution, "layer_assignment", None)
+        if layer_assignment is not None:
+            return layer_assignment.as_object_to_layer()
+    if hasattr(layer_assignment_or_solution, "areas"):
+        return {
+            object_type: layer
+            for layer, area in enumerate(layer_assignment_or_solution.areas, start=1)
+            for object_type in area.object_types
+        }
+    if hasattr(layer_assignment_or_solution, "as_object_to_layer"):
+        return layer_assignment_or_solution.as_object_to_layer()
+    return dict(layer_assignment_or_solution or {})
+
+
+def _hierarchy_to_discovered_models(hierarchy):
+    if hierarchy is None or not hasattr(hierarchy, "areas"):
+        return hierarchy or {}
+
+    discovered_models = {}
+    subprocess_index = 1
+    for layer, area in enumerate(hierarchy.areas, start=1):
+        subprocess_components = []
+        for subprocess in area.subprocesses or ():
+            raw_subprocess = getattr(subprocess, "raw", subprocess)
+            if raw_subprocess is None:
+                continue
+            try:
+                raw_subprocess["index"] = subprocess_index
+                raw_subprocess["global_id"] = f"subprocess_{subprocess_index}"
+            except Exception:
+                pass
+            subprocess_components.append(raw_subprocess)
+            subprocess_index += 1
+
+        discovered_models[layer] = {
+            "object_types": sorted(area.object_types),
+            "activities": sorted(area.activities),
+            "activity_resources": {
+                activity: sorted(resource_types)
+                for activity, resource_types in area.resources.items()
+            },
+            "highlighted_activities": [],
+            "ocpn": area.net.raw if area.net is not None else None,
+            "subprocess_components": tuple(subprocess_components),
+        }
+
+    return discovered_models
+
+
+def _normalize_visualization_inputs(layer_assignment_or_solution, hierarchy_or_models=None):
+    if hierarchy_or_models is None and hasattr(layer_assignment_or_solution, "areas"):
+        hierarchy_or_models = layer_assignment_or_solution
+    return (
+        _object_to_layer_mapping(layer_assignment_or_solution),
+        _hierarchy_to_discovered_models(hierarchy_or_models),
+    )
+
+
+def visualize_layers_boxed(layer_assignment_or_solution, title="Hierarchy Layers", output_path=None):
+    solution = _object_to_layer_mapping(layer_assignment_or_solution)
     layers = defaultdict(list)
     for node, layer in solution.items():
         layers[layer].append(str(node))
@@ -1039,13 +1100,17 @@ def _draw_object_type_boxes(
 
 
 def _visualize_hierarchy_with_model_renderer(
-        solution,
-        discovered_models,
+        layer_assignment_or_solution,
+        hierarchy_or_models,
         *,
         title,
         output_path=None,
         model_image_renderer,
 ):
+    solution, discovered_models = _normalize_visualization_inputs(
+        layer_assignment_or_solution,
+        hierarchy_or_models,
+    )
     if not solution:
         return None
 
@@ -1195,14 +1260,14 @@ def _visualize_hierarchy_with_model_renderer(
 
 
 def visualize_hierarchy_with_models(
-        solution,
-        discovered_models,
+        layer_assignment_or_solution,
+        hierarchy_or_models=None,
         title="Hierarchy with Process Models",
         output_path=None,
 ):
     return _visualize_hierarchy_with_model_renderer(
-        solution,
-        discovered_models,
+        layer_assignment_or_solution,
+        hierarchy_or_models,
         title=title,
         output_path=output_path,
         model_image_renderer=_render_model_image_for_hierarchy_row,
@@ -1210,14 +1275,14 @@ def visualize_hierarchy_with_models(
 
 
 def visualize_hierarchy_with_indexed_subprocesses(
-        solution,
-        discovered_models,
+        layer_assignment_or_solution,
+        hierarchy_or_models=None,
         title="Hierarchy with Indexed Subprocesses",
         output_path=None,
 ):
     return _visualize_hierarchy_with_model_renderer(
-        solution,
-        discovered_models,
+        layer_assignment_or_solution,
+        hierarchy_or_models,
         title=title,
         output_path=output_path,
         model_image_renderer=_render_indexed_subprocess_image_for_hierarchy_row,

@@ -845,7 +845,7 @@ class ModelDiscovery:
             self.activity_layer_assignment = activity_layer_assignment
             span.update(postfix=f"activities={len(activity_layer_assignment.activity_to_layer)}")
 
-            hierarchy = AdvancedProcessAreaHierarchy()
+            hierarchy = AdvancedProcessAreaHierarchy(layer_assignment=layer_assignment)
 
             for layer in range(1, layer_count + 1):
                 with span.child(

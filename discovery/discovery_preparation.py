@@ -553,9 +553,21 @@ def _assign_subprocess_indices_across_layers(discovered_models):
 
 
 def _discover_ocpn(layer_ocel):
-    if layer_ocel.events.empty or layer_ocel.relations.empty:
+    if _is_empty_table(layer_ocel.events) or _is_empty_table(layer_ocel.relations):
         return None
     return pm4py.discover_oc_petri_net(layer_ocel)
+
+
+def _is_empty_table(table):
+    if table is None:
+        return True
+    empty = getattr(table, "empty", None)
+    if empty is not None:
+        return bool(empty)
+    try:
+        return len(table) == 0
+    except TypeError:
+        return False
 
 
 def _component_visible_activities(component):
