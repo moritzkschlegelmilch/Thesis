@@ -16,3 +16,5 @@ tests/*
 heavy_compute/
 simple_logs/
 output/
+simple_logs_evaluation_2
+simple_logs_evaluation
