@@ -414,6 +414,30 @@ class NetQualityTests(unittest.TestCase):
             ["create", "approve", "complete"],
         )
 
+    def test_prepare_log_can_limit_context_prefix_length(self):
+        ocel = _build_single_type_ocel([
+            ["create", "approve", "complete", "ship"],
+        ])
+        ocpn = _build_flower_ocpn(["create", "approve", "complete", "ship"])
+        quality = NetQuality(ocpn, ocel, precision_context_length=2)
+
+        prepared = quality._prepare_log(ocel)
+
+        context_counter = dict(prepared["ctx"]["e4"])["order"]
+        self.assertEqual(context_counter, ((("approve", "complete"), 1),))
+
+    def test_prepare_log_can_drop_context_prefix_with_zero_length(self):
+        ocel = _build_single_type_ocel([
+            ["create", "approve", "complete", "ship"],
+        ])
+        ocpn = _build_flower_ocpn(["create", "approve", "complete", "ship"])
+        quality = NetQuality(ocpn, ocel, precision_context_length=0)
+
+        prepared = quality._prepare_log(ocel)
+
+        context_counter = dict(prepared["ctx"]["e4"])["order"]
+        self.assertEqual(context_counter, (((), 1),))
+
     def test_progress_output_can_be_enabled(self):
         ocel = _build_single_type_ocel([
             ["create", "approve", "complete"],

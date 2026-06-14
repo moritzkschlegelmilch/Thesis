@@ -170,6 +170,7 @@ class PrecisionCalculator:
                 **_log_metadata(log),
                 "sample_size": self.parameters.sample_size,
                 "depth": self.parameters.d,
+                "length": self.parameters.l,
             },
         ):
             return float(NetQuality(
@@ -178,6 +179,7 @@ class PrecisionCalculator:
                 max_nodes_per_replay=self.parameters.replay_budget or 1000,
                 precision_context_sample_size=self.parameters.sample_size,
                 precision_context_depth=self.parameters.d,
+                precision_context_length=self.parameters.l,
                 random_seed=self.parameters.random_seed,
             ).precision())
 
@@ -191,6 +193,7 @@ class PrecisionCalculator:
                 **_log_metadata(log),
                 "sample_size": self.parameters.sample_size,
                 "depth": self.parameters.d,
+                "length": self.parameters.l,
             },
         ) as span:
             quality = NetQuality(
@@ -199,6 +202,7 @@ class PrecisionCalculator:
                 max_nodes_per_replay=self.parameters.replay_budget or 1000,
                 precision_context_sample_size=self.parameters.sample_size,
                 precision_context_depth=self.parameters.d,
+                precision_context_length=self.parameters.l,
                 random_seed=self.parameters.random_seed,
             )
             prepared_original = quality._prepare_log(log)

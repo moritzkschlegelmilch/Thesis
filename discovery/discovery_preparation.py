@@ -1254,6 +1254,7 @@ def _build_precision_reference_bundle(
     *,
     precision_context_sample_size=None,
     precision_context_depth=5,
+    precision_context_length=5,
     precision_context_sample_seed=None,
     show_progress=False,
 ):
@@ -1300,6 +1301,7 @@ def _build_precision_reference_bundle(
         merged_ocel,
         precision_context_sample_size=precision_context_sample_size,
         precision_context_depth=precision_context_depth,
+        precision_context_length=precision_context_length,
         random_seed=precision_context_sample_seed,
     )
     prepared_original = quality._prepare_log(merged_ocel, show_progress=show_progress)
@@ -1322,7 +1324,8 @@ def _build_precision_reference_bundle(
             f"contexts={len(sampled_contexts)}/{len(exact_context_weights)}, "
             f"draws={sampled_events}, "
             f"mode={'sampled' if sampled_context_weights is not None else 'exact'}, "
-            f"depth={'full' if precision_context_depth is None else precision_context_depth}",
+            f"depth={'full' if precision_context_depth is None else precision_context_depth}, "
+            f"length={'full' if precision_context_length is None else precision_context_length}",
             file=sys.stdout,
         )
     original_terminal_states_by_context = _build_terminal_states_by_context(
@@ -2092,6 +2095,7 @@ def discover_models_for_hierarchy(
     *,
     precision_context_sample_size=512,
     precision_context_depth=5,
+    precision_context_length=5,
     precision_context_sample_seed=None,
 ):
     object_to_type, event_records = _extract_ocel_filtering_context(ocel)
@@ -2196,6 +2200,7 @@ def discover_models_for_hierarchy(
                         previous_layer_ocpn,
                         precision_context_sample_size=precision_context_sample_size,
                         precision_context_depth=precision_context_depth,
+                        precision_context_length=precision_context_length,
                         precision_context_sample_seed=precision_context_sample_seed,
                         show_progress=show_progress,
                     )

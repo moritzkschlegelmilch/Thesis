@@ -128,6 +128,7 @@ class ProcessAreaDiscoveryFramework(ABC):
         *,
         precision_context_sample_size=512,
         precision_context_depth=5,
+        precision_context_length=5,
         precision_context_sample_seed=None,
     ):
         self.activity_to_layer, self.discovered_models = discover_models_for_hierarchy(
@@ -137,6 +138,7 @@ class ProcessAreaDiscoveryFramework(ABC):
             show_progress=show_progress,
             precision_context_sample_size=precision_context_sample_size,
             precision_context_depth=precision_context_depth,
+            precision_context_length=precision_context_length,
             precision_context_sample_seed=precision_context_sample_seed,
         )
 
@@ -152,6 +154,7 @@ class ProcessAreaDiscoveryFramework(ABC):
         *,
         precision_context_sample_size=512,
         precision_context_depth=5,
+        precision_context_length=5,
         precision_context_sample_seed=None,
     ):
         self.get_layers(show_progress=show_progress)
@@ -160,6 +163,7 @@ class ProcessAreaDiscoveryFramework(ABC):
             show_progress=show_progress,
             precision_context_sample_size=precision_context_sample_size,
             precision_context_depth=precision_context_depth,
+            precision_context_length=precision_context_length,
             precision_context_sample_seed=precision_context_sample_seed,
         )
         return self.solution, self.discovered_models

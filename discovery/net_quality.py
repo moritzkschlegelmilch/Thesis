@@ -86,6 +86,7 @@ class NetQuality:
         max_nodes_per_replay: int | None = 1000,
         precision_context_sample_size: int | None = None,
         precision_context_depth: int | None = None,
+        precision_context_length: int | None = None,
         random_seed: int | None = None,
     ) -> None:
         self.ocpn = ocpn
@@ -93,6 +94,7 @@ class NetQuality:
         self.max_nodes_per_replay = max_nodes_per_replay
         self.precision_context_sample_size = precision_context_sample_size
         self.precision_context_depth = precision_context_depth
+        self.precision_context_length = precision_context_length
         self.random_seed = random_seed
 
         self._model_cache: _ModelCache | None = None
@@ -844,6 +846,8 @@ class NetQuality:
             raise ValueError("No OCEL was provided.")
         if self.precision_context_depth is not None and self.precision_context_depth < 0:
             raise ValueError("precision_context_depth must be non-negative.")
+        if self.precision_context_length is not None and self.precision_context_length < 0:
+            raise ValueError("precision_context_length must be non-negative.")
 
         events = ocel.events
         rel = ocel.relations
@@ -937,6 +941,8 @@ class NetQuality:
             desc = "Preparing OCPA-style event contexts"
             if self.precision_context_depth is not None:
                 desc += f" (d={self.precision_context_depth})"
+            if self.precision_context_length is not None:
+                desc += f" (l={self.precision_context_length})"
             ordered_iter = tqdm(
                 ordered,
                 total=len(ordered),
@@ -963,6 +969,11 @@ class NetQuality:
                     for pe in object_events.get(token, ())
                     if pe in preset_events
                 )
+                if self.precision_context_length is not None:
+                    if self.precision_context_length == 0:
+                        prefix = ()
+                    else:
+                        prefix = prefix[-self.precision_context_length:]
                 context[ot][prefix] += 1
 
             key = tuple(
