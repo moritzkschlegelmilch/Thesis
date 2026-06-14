@@ -72,6 +72,8 @@ def build_default_layer_miner(
             CardinalityRelationScorer(1),
             DivergenceScorer(1),
         ],
+        alpha=1.0,
+        beta=2.0,
         checkpoint=checkpoint,
         verbose=verbose,
     )
