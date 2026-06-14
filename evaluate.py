@@ -25,6 +25,7 @@ from discovery import (
     PrecisionCalculator,
     PrecisionParameters,
     QualityScores,
+    SubprocessMoveUpOptimization,
     SubprocessMiner,
 )
 from discovery.scorables import (
@@ -80,6 +81,7 @@ def build_default_model_discovery(
     checkpoint: CheckpointManager | None = None,
     *,
     verbose: bool = False,
+    optimization_mode: str = "quality",
     precision_context_sample_size: int | None = DEFAULT_PRECISION_CONTEXT_SAMPLE_SIZE,
     precision_context_depth: int | None = DEFAULT_PRECISION_CONTEXT_DEPTH,
     precision_context_sample_seed: int | None = DEFAULT_PRECISION_CONTEXT_SAMPLE_SEED,
@@ -103,10 +105,16 @@ def build_default_model_discovery(
         checkpoint=checkpoint,
         verbose=verbose,
     )
+    if optimization_mode == "quality":
+        optimization = GreedyOptimization(check_set, checkpoint=checkpoint, verbose=verbose)
+    elif optimization_mode == "subprocess-only":
+        optimization = SubprocessMoveUpOptimization(check_set, checkpoint=checkpoint, verbose=verbose)
+    else:
+        raise ValueError(f"Unknown optimization mode {optimization_mode!r}.")
 
     return ModelDiscovery(
         PM4PyOCPNDiscovery(checkpoint=checkpoint, verbose=verbose),
-        GreedyOptimization(check_set, checkpoint=checkpoint, verbose=verbose),
+        optimization,
         subprocess_miner=SubprocessMiner(checkpoint=checkpoint, verbose=verbose),
         alpha_decision_parameter=0.5,
         checkpoint=checkpoint,
@@ -129,6 +137,7 @@ def evaluate_event_log_folder(
     log_importer: Callable[[str], Any] = import_ocel,
     continue_on_error: bool = True,
     per_log_timeout_seconds: int | float | None = None,
+    skip_quality: bool = False,
 ) -> dict[str, Any]:
     """Evaluate all event logs in a folder with configured layer and hierarchy miners.
 
@@ -185,6 +194,7 @@ def evaluate_event_log_folder(
                         verbose=verbose,
                         checkpoint=checkpoint,
                         log_importer=log_importer,
+                        skip_quality=skip_quality,
                     )
             except Exception as exc:
                 if not continue_on_error:
@@ -229,6 +239,7 @@ def evaluate_log(
     verbose: bool = True,
     checkpoint: CheckpointManager | None = None,
     log_importer: Callable[[str], Any] = import_ocel,
+    skip_quality: bool = False,
 ) -> dict[str, Any]:
     """Evaluate a single event log and write all thesis evaluation artifacts."""
     _configure_runtime()
@@ -240,7 +251,7 @@ def evaluate_log(
     checkpoint = checkpoint or CheckpointManager(verbose=verbose, collect=True)
     _attach_checkpoint(layer_miner, checkpoint)
     _attach_checkpoint(hierarchy_miner, checkpoint)
-    if quality_evaluator is not None:
+    if quality_evaluator is not None and not skip_quality:
         _attach_checkpoint(quality_evaluator, checkpoint)
 
     ocel = None
@@ -264,15 +275,19 @@ def evaluate_log(
             hierarchy_stats = _summarize_hierarchy(hierarchy)
             span.update(postfix=f"areas={hierarchy_stats.get('areas')}")
 
-            evaluator = quality_evaluator or _derive_quality_evaluator(
-                hierarchy_miner,
-                checkpoint=checkpoint,
-                verbose=verbose,
-            )
-            quality_log = _quality_log(ocel)
-            quality = evaluator.evaluate(quality_log, hierarchy)
-            quality_data = _quality_to_dict(quality)
-            span.update(postfix=f"quality={quality.quality:.3f}")
+            if skip_quality:
+                quality_data = {"skipped": True}
+                span.update(postfix="quality skipped")
+            else:
+                evaluator = quality_evaluator or _derive_quality_evaluator(
+                    hierarchy_miner,
+                    checkpoint=checkpoint,
+                    verbose=verbose,
+                )
+                quality_log = _quality_log(ocel)
+                quality = evaluator.evaluate(quality_log, hierarchy)
+                quality_data = _quality_to_dict(quality)
+                span.update(postfix=f"quality={quality.quality:.3f}")
 
             artifacts = _render_artifacts(input_path, output_dir, hierarchy)
             span.update(postfix="visualizations saved")
@@ -589,7 +604,7 @@ def _quality_csv_row(summary: dict[str, Any]) -> dict[str, Any]:
         "hierarchy_object_types": hierarchy.get("object_types"),
         "activities": hierarchy.get("activities"),
         "subprocesses": hierarchy.get("subprocesses"),
-        **summary.get("quality", {}),
+        **(summary.get("quality") or {}),
     }
 
 
@@ -674,6 +689,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_MAX_NODES_PER_REPLAY,
     )
     parser.add_argument(
+        "--subprocess-only",
+        action="store_true",
+        help=(
+            "Use subprocess-only move-up optimization and skip final quality "
+            "calculation, avoiding information-loss precision computation."
+        ),
+    )
+    parser.add_argument(
+        "--skip-quality",
+        action="store_true",
+        help="Skip final hierarchy quality calculation.",
+    )
+    parser.add_argument(
         "--no-progress",
         action="store_true",
         help="Disable progress bars.",
@@ -704,6 +732,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         args.per_log_timeout_seconds,
         args.per_log_timeout_minutes,
     )
+    skip_quality = args.skip_quality or args.subprocess_only
     return evaluate_event_log_folder(
         args.input_dir,
         args.output_dir,
@@ -711,6 +740,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         build_default_model_discovery(
             checkpoint=checkpoint,
             verbose=verbose,
+            optimization_mode="subprocess-only" if args.subprocess_only else "quality",
             precision_context_sample_size=args.precision_context_sample_size,
             precision_context_depth=args.precision_context_depth,
             precision_context_sample_seed=args.precision_context_sample_seed,
@@ -722,6 +752,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         verbose=verbose,
         continue_on_error=not args.fail_fast,
         per_log_timeout_seconds=timeout_seconds,
+        skip_quality=skip_quality,
     )
 
 
