@@ -8,6 +8,21 @@ from collections import defaultdict
 from . import ObjectCentricEventLog
 
 
+def _timestamp_epoch_expr(column_name: str = "_timestamp_str") -> pl.Expr:
+    timestamp_col = pl.col(column_name)
+    timezone_aware_epoch = (
+        timestamp_col
+        .str.to_datetime(format="%Y-%m-%dT%H:%M:%S%.f%#z", strict=False)
+        .dt.epoch(time_unit="s")
+    )
+    timezone_less_epoch = (
+        timestamp_col
+        .str.to_datetime(format="%Y-%m-%dT%H:%M:%S%.f", strict=False)
+        .dt.epoch(time_unit="s")
+    )
+    return pl.coalesce(timezone_aware_epoch, timezone_less_epoch).alias("_timestampUnix")
+
+
 def import_ocel(file_path: str, file_format: str = None) -> ObjectCentricEventLog:
     """
     Imports an OCEL 2.0 file and returns an ObjectCentricEventLog.
@@ -351,16 +366,7 @@ def load_events_from_sqlite(file_path: str) -> pl.DataFrame:
         _qualifiers=pl.col("_qualifiers").list.drop_nulls(),
     )
 
-    # Convert the timestamp string to a datetime object and then to epoch seconds
-    df = df.with_columns(
-        pl.col("_timestamp_str")
-        .str.to_datetime(format="%Y-%m-%dT%H:%M:%S%.f%#z")
-        .alias("_timestamp_datetime")
-    )
-
-    df = df.with_columns(
-        pl.col("_timestamp_datetime").dt.epoch(time_unit="s").alias("_timestampUnix")
-    )
+    df = df.with_columns(_timestamp_epoch_expr())
 
     df = df.select(
         ["_eventId", "_activity", "_timestampUnix", "_objects", "_qualifiers"]
@@ -468,19 +474,7 @@ def load_events_from_json(json_path: str) -> pl.DataFrame:
         }
     )
 
-
-
-    # Convert the timestamp string to a datetime object and then to epoch seconds
-    # This is just for testing purposes TODO Revert later
-    df = df.with_columns(
-        pl.col("_timestamp_str")
-        .str.to_datetime(format="%Y-%m-%dT%H:%M:%S%#z", strict=False)
-        .alias("_timestamp_datetime")
-    )
-
-    df = df.with_columns(
-        pl.col("_timestamp_datetime").dt.epoch(time_unit="s").alias("_timestampUnix")
-    )
+    df = df.with_columns(_timestamp_epoch_expr())
 
     df = df.select(
         ["_eventId", "_activity", "_timestampUnix", "_objects", "_qualifiers"]
@@ -557,13 +551,7 @@ def load_events_from_xml(xml_path: str) -> pl.DataFrame:
         }
     )
 
-    df = df.with_columns(
-        pl.col("_timestamp_str")
-        .str.to_datetime(format="%Y-%m-%dT%H:%M:%S%.f%#z", strict=False)
-        .alias("_timestamp_datetime")
-    ).with_columns(
-        pl.col("_timestamp_datetime").dt.epoch(time_unit="s").alias("_timestampUnix")
-    )
+    df = df.with_columns(_timestamp_epoch_expr())
 
     return df.select(
         ["_eventId", "_activity", "_timestampUnix", "_objects", "_qualifiers"]

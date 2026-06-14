@@ -1,0 +1,249 @@
+{
+  "checkpoints": [
+    {
+      "count": 1,
+      "duration_seconds": 1.2152764580096118,
+      "ended_at": 241905.802500041,
+      "metadata": {
+        "path": "simple_logs/01_o2c.xml"
+      },
+      "name": "Import event log",
+      "parent": "Evaluate event log",
+      "started_at": 241904.587223583,
+      "status": "ok",
+      "total": null
+    },
+    {
+      "count": 1,
+      "duration_seconds": 0.23102145799202845,
+      "ended_at": 241906.035242708,
+      "metadata": {
+        "indicator": "TimeRelationScorer"
+      },
+      "name": "Prepare TimeRelationScorer",
+      "parent": "Prepare resource indicators",
+      "started_at": 241905.80422125,
+      "status": "ok",
+      "total": null
+    },
+    {
+      "count": 1,
+      "duration_seconds": 0.14443812501849607,
+      "ended_at": 241906.180001875,
+      "metadata": {
+        "indicator": "CardinalityRelationScorer"
+      },
+      "name": "Prepare CardinalityRelationScorer",
+      "parent": "Prepare resource indicators",
+      "started_at": 241906.03556375,
+      "status": "ok",
+      "total": null
+    },
+    {
+      "count": 1,
+      "duration_seconds": 0.17243116701138206,
+      "ended_at": 241906.352737333,
+      "metadata": {
+        "indicator": "DivergenceScorer"
+      },
+      "name": "Prepare DivergenceScorer",
+      "parent": "Prepare resource indicators",
+      "started_at": 241906.180306166,
+      "status": "ok",
+      "total": null
+    },
+    {
+      "count": 3,
+      "duration_seconds": 0.5489239169983193,
+      "ended_at": 241906.353064083,
+      "metadata": {
+        "indicators": 3
+      },
+      "name": "Prepare resource indicators",
+      "parent": "Layer assignment mining",
+      "started_at": 241905.804140166,
+      "status": "ok",
+      "total": 3
+    },
+    {
+      "count": 81,
+      "duration_seconds": 0.0003558750031515956,
+      "ended_at": 241906.35351425,
+      "metadata": {
+        "object_types": 9
+      },
+      "name": "Assign resource scores",
+      "parent": "Layer assignment mining",
+      "started_at": 241906.353158375,
+      "status": "ok",
+      "total": 81
+    },
+    {
+      "count": 1,
+      "duration_seconds": 0.7079104169970378,
+      "ended_at": 241907.061563083,
+      "metadata": {
+        "object_types": 9
+      },
+      "name": "Solve layer ILP",
+      "parent": "Layer assignment mining",
+      "started_at": 241906.353652666,
+      "status": "ok",
+      "total": null
+    },
+    {
+      "count": 1,
+      "duration_seconds": 0.00011962497956119478,
+      "ended_at": 241907.06205575,
+      "metadata": {},
+      "name": "Normalize layer assignment",
+      "parent": "Layer assignment mining",
+      "started_at": 241907.061936125,
+      "status": "ok",
+      "total": null
+    },
+    {
+      "count": 4,
+      "duration_seconds": 1.2580689159804024,
+      "ended_at": 241907.062085041,
+      "metadata": {
+        "object_types": 9
+      },
+      "name": "Layer assignment mining",
+      "parent": "Evaluate event log",
+      "started_at": 241905.804016125,
+      "status": "ok",
+      "total": 4
+    },
+    {
+      "count": 1,
+      "duration_seconds": 0.020867040992015973,
+      "ended_at": 241907.083133541,
+      "metadata": {},
+      "name": "Extract OCEL filtering context",
+      "parent": "Model discovery",
+      "started_at": 241907.0622665,
+      "status": "ok",
+      "total": null
+    },
+    {
+      "count": 1,
+      "duration_seconds": 0.007692791987210512,
+      "ended_at": 241907.090917333,
+      "metadata": {
+        "object_types": 9
+      },
+      "name": "Derive activity layer assignment",
+      "parent": "Model discovery",
+      "started_at": 241907.083224541,
+      "status": "ok",
+      "total": null
+    },
+    {
+      "count": 1,
+      "duration_seconds": 0.21105429201270454,
+      "ended_at": 241907.302181375,
+      "metadata": {
+        "activities": 20
+      },
+      "name": "Build full layer log",
+      "parent": "Discover process area layer 1",
+      "started_at": 241907.091127083,
+      "status": "ok",
+      "total": null
+    },
+    {
+      "count": 1,
+      "duration_seconds": 0.16504404100123793,
+      "ended_at": 241907.467696791,
+      "metadata": {
+        "activities": 20
+      },
+      "name": "Filter full layer log",
+      "parent": "Prepare checkset delta reference",
+      "started_at": 241907.30265275,
+      "status": "ok",
+      "total": null
+    },
+    {
+      "count": 1,
+      "duration_seconds": 0.7755204170243815,
+      "ended_at": 241908.243809875,
+      "metadata": {
+        "events": 24660,
+        "objects": 8319,
+        "relations": 41653
+      },
+      "name": "PM4Py OCPN discovery",
+      "parent": "Prepare checkset delta reference",
+      "started_at": 241907.468289458,
+      "status": "failed",
+      "total": null
+    },
+    {
+      "count": 1,
+      "duration_seconds": 0.9414831250032876,
+      "ended_at": 241908.244025333,
+      "metadata": {
+        "activities": 20,
+        "prepare_precision": true,
+        "subprocess_activities": 0
+      },
+      "name": "Prepare checkset delta reference",
+      "parent": "Discover process area layer 1",
+      "started_at": 241907.302542208,
+      "status": "failed",
+      "total": 5
+    },
+    {
+      "count": 2,
+      "duration_seconds": 1.153045832994394,
+      "ended_at": 241908.244044333,
+      "metadata": {
+        "candidate_activities": 0,
+        "full_activities": 20,
+        "layer": 1,
+        "native_activities": 20,
+        "object_types": 8
+      },
+      "name": "Discover process area layer 1",
+      "parent": "Model discovery",
+      "started_at": 241907.0909985,
+      "status": "failed",
+      "total": 8
+    },
+    {
+      "count": 2,
+      "duration_seconds": 1.1818660839926451,
+      "ended_at": 241908.24405975,
+      "metadata": {
+        "layers": 2
+      },
+      "name": "Model discovery",
+      "parent": "Evaluate event log",
+      "started_at": 241907.062193666,
+      "status": "failed",
+      "total": 4
+    },
+    {
+      "count": 2,
+      "duration_seconds": 3.6569902909977827,
+      "ended_at": 241908.244074166,
+      "metadata": {
+        "log": "01_o2c.xml"
+      },
+      "name": "Evaluate event log",
+      "parent": null,
+      "started_at": 241904.587083875,
+      "status": "failed",
+      "total": 6
+    }
+  ],
+  "error": {
+    "message": "NaTType does not support timestamp",
+    "type": "ValueError"
+  },
+  "input_path": "simple_logs/01_o2c.xml",
+  "output_dir": "s_logs_output/01_o2c",
+  "status": "failed"
+}

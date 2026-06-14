@@ -10,6 +10,9 @@ tests/*
 !tests/test_subprocess_detection.py
 !tests/test_net_quality.py
 !tests/test_region_detection.py
+!tests/test_discovery_preparation.py
+!tests/test_model_discovery_speedups.py
+!tests/test_ocel_importer.py
 heavy_compute/
 simple_logs/
 output/

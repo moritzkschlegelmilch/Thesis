@@ -293,44 +293,49 @@ def _discover_activity_resources(event_records, object_to_type, solution, refere
 
 
 def _construct_ocel(event_rows, object_rows, relation_rows, o2o_rows):
-    event_rows = [
-        {
-            **row,
-            "ocel:timestamp": _normalize_pm4py_timestamp(row.get("ocel:timestamp")),
-        }
-        for row in event_rows
-    ]
-    relation_rows = [
-        {
-            **row,
-            "ocel:timestamp": _normalize_pm4py_timestamp(row.get("ocel:timestamp")),
-        }
-        for row in relation_rows
-    ]
+    events_df = pd.DataFrame(
+        event_rows,
+        columns=["ocel:eid", "ocel:activity", "ocel:timestamp"],
+    )
+    objects_df = pd.DataFrame(
+        object_rows,
+        columns=["ocel:oid", "ocel:type"],
+    )
+    relations_df = pd.DataFrame(
+        relation_rows,
+        columns=[
+            "ocel:eid",
+            "ocel:activity",
+            "ocel:timestamp",
+            "ocel:oid",
+            "ocel:type",
+            "ocel:qualifier",
+        ],
+    )
     o2o_df = pd.DataFrame(
         o2o_rows,
         columns=["ocel:oid", "ocel:oid_2", "ocel:qualifier"],
     )
+    return _construct_ocel_from_frames(events_df, objects_df, relations_df, o2o_df)
+
+
+def _construct_ocel_from_frames(events_df, objects_df, relations_df, o2o_df):
+    events_df = events_df.copy()
+    relations_df = relations_df.copy()
+
+    if "ocel:timestamp" in events_df.columns:
+        events_df["ocel:timestamp"] = _normalize_pm4py_timestamp_column(
+            events_df["ocel:timestamp"]
+        )
+    if "ocel:timestamp" in relations_df.columns:
+        relations_df["ocel:timestamp"] = _normalize_pm4py_timestamp_column(
+            relations_df["ocel:timestamp"]
+        )
+
     kwargs = {
-        "events": pd.DataFrame(
-            event_rows,
-            columns=["ocel:eid", "ocel:activity", "ocel:timestamp"],
-        ),
-        "objects": pd.DataFrame(
-            object_rows,
-            columns=["ocel:oid", "ocel:type"],
-        ),
-        "relations": pd.DataFrame(
-            relation_rows,
-            columns=[
-                "ocel:eid",
-                "ocel:activity",
-                "ocel:timestamp",
-                "ocel:oid",
-                "ocel:type",
-                "ocel:qualifier",
-            ],
-        ),
+        "events": events_df,
+        "objects": objects_df,
+        "relations": relations_df,
     }
 
     try:
@@ -346,10 +351,25 @@ def _construct_ocel(event_rows, object_rows, relation_rows, o2o_rows):
     if not hasattr(built_ocel, "o2o_graph_edges"):
         built_ocel.o2o_graph_edges = tuple(
             (row["ocel:oid"], row["ocel:oid_2"])
-            for row in o2o_rows
+            for row in o2o_df.to_dict("records")
         )
 
     return built_ocel
+
+
+def _normalize_pm4py_timestamp_column(timestamps):
+    timestamp_series = pd.Series(timestamps)
+    non_null = timestamp_series.dropna()
+    if non_null.empty:
+        return pd.to_datetime(timestamp_series)
+
+    if all(isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool) for timestamp in non_null):
+        return pd.to_datetime(timestamp_series, unit="s")
+
+    if any(isinstance(timestamp, (int, float)) and not isinstance(timestamp, bool) for timestamp in non_null):
+        return timestamp_series.map(_normalize_pm4py_timestamp)
+
+    return pd.to_datetime(timestamp_series)
 
 
 def _normalize_pm4py_timestamp(timestamp):
@@ -370,11 +390,18 @@ def _build_projected_ocel(
     *,
     selected_object_types=None,
 ):
-    event_rows = []
-    relation_rows = []
-    used_objects = set()
+    event_ids = []
+    event_activities = []
+    event_timestamps = []
+    relation_event_ids = []
+    relation_activities = []
+    relation_timestamps = []
+    relation_object_ids = []
+    relation_object_types = []
     included_event_records = []
-    included_activities = set()
+    object_events = defaultdict(set)
+    object_type_by_used_object = {}
+    used_object_types = set()
     selected_object_types = (
         set(selected_object_types)
         if selected_object_types is not None
@@ -385,43 +412,95 @@ def _build_projected_ocel(
         if activity not in selected_activities:
             continue
 
-        if selected_object_types is None:
-            selected_event_objects = list(dict.fromkeys(event_objects))
-        else:
-            selected_event_objects = [
-                obj
-                for obj in event_objects
-                if object_to_type[obj] in selected_object_types
-            ]
+        selected_event_objects = []
+        seen_event_objects = set()
+        for obj in event_objects:
+            if obj in seen_event_objects:
+                continue
+            object_type = object_to_type[obj]
+            if selected_object_types is not None and object_type not in selected_object_types:
+                continue
+            seen_event_objects.add(obj)
+            selected_event_objects.append(obj)
+
         if not selected_event_objects:
             continue
 
         included_event_records.append((event_id, activity, timestamp, event_objects))
-        included_activities.add(activity)
-        event_rows.append({
-            "ocel:eid": event_id,
-            "ocel:activity": activity,
-            "ocel:timestamp": timestamp,
-        })
+        event_ids.append(event_id)
+        event_activities.append(activity)
+        event_timestamps.append(timestamp)
 
-        for obj in dict.fromkeys(selected_event_objects):
-            used_objects.add(obj)
-            relation_rows.append({
-                "ocel:eid": event_id,
-                "ocel:activity": activity,
-                "ocel:timestamp": timestamp,
-                "ocel:oid": obj,
-                "ocel:type": object_to_type[obj],
-                "ocel:qualifier": None,
-            })
+        for obj in selected_event_objects:
+            object_type = object_to_type[obj]
+            relation_event_ids.append(event_id)
+            relation_activities.append(activity)
+            relation_timestamps.append(timestamp)
+            relation_object_ids.append(obj)
+            relation_object_types.append(object_type)
+            object_events[obj].add(event_id)
+            object_type_by_used_object[obj] = object_type
+            used_object_types.add(object_type)
 
-    object_rows = [
-        {
-            "ocel:oid": obj,
-            "ocel:type": object_to_type[obj],
-        }
-        for obj in sorted(used_objects)
-    ]
+    retained_object_types = {
+        object_type_by_used_object[obj]
+        for obj, event_ids_for_object in object_events.items()
+        if len(event_ids_for_object) >= 2
+    }
+    if retained_object_types != used_object_types:
+        keep_relation_indexes = [
+            index
+            for index, object_type in enumerate(relation_object_types)
+            if object_type in retained_object_types
+        ]
+        relation_event_ids = [relation_event_ids[index] for index in keep_relation_indexes]
+        relation_activities = [relation_activities[index] for index in keep_relation_indexes]
+        relation_timestamps = [relation_timestamps[index] for index in keep_relation_indexes]
+        relation_object_ids = [relation_object_ids[index] for index in keep_relation_indexes]
+        relation_object_types = [relation_object_types[index] for index in keep_relation_indexes]
+
+        retained_event_ids = set(relation_event_ids)
+        keep_event_indexes = [
+            index
+            for index, event_id in enumerate(event_ids)
+            if event_id in retained_event_ids
+        ]
+        event_ids = [event_ids[index] for index in keep_event_indexes]
+        event_activities = [event_activities[index] for index in keep_event_indexes]
+        event_timestamps = [event_timestamps[index] for index in keep_event_indexes]
+        included_event_records = [
+            event_record
+            for event_record in included_event_records
+            if event_record[0] in retained_event_ids
+        ]
+
+    included_activities = {event_record[1] for event_record in included_event_records}
+    used_objects = set(relation_object_ids)
+
+    object_ids = sorted(used_objects)
+    events_df = pd.DataFrame({
+        "ocel:eid": event_ids,
+        "ocel:activity": event_activities,
+        "ocel:timestamp": event_timestamps,
+    }, columns=["ocel:eid", "ocel:activity", "ocel:timestamp"])
+    objects_df = pd.DataFrame({
+        "ocel:oid": object_ids,
+        "ocel:type": [object_to_type[obj] for obj in object_ids],
+    }, columns=["ocel:oid", "ocel:type"])
+    relations_df = pd.DataFrame({
+        "ocel:eid": relation_event_ids,
+        "ocel:activity": relation_activities,
+        "ocel:timestamp": relation_timestamps,
+        "ocel:oid": relation_object_ids,
+        "ocel:type": relation_object_types,
+    }, columns=[
+        "ocel:eid",
+        "ocel:activity",
+        "ocel:timestamp",
+        "ocel:oid",
+        "ocel:type",
+    ])
+    relations_df["ocel:qualifier"] = None
 
     o2o_rows = [
         {
@@ -432,12 +511,16 @@ def _build_projected_ocel(
         for source_obj, target_obj in _iter_ocel_o2o_edges(ocel)
         if source_obj in used_objects and target_obj in used_objects
     ]
-
-    layer_ocel = _construct_ocel(
-        event_rows,
-        object_rows,
-        relation_rows,
+    o2o_df = pd.DataFrame(
         o2o_rows,
+        columns=["ocel:oid", "ocel:oid_2", "ocel:qualifier"],
+    )
+
+    layer_ocel = _construct_ocel_from_frames(
+        events_df,
+        objects_df,
+        relations_df,
+        o2o_df,
     )
 
     return layer_ocel, included_event_records, sorted(included_activities)

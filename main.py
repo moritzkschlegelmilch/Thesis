@@ -23,7 +23,7 @@ from helpers.vorbose import (
 from totem_lib import import_ocel
 
 
-DEFAULT_INPUT_PATH = "example_data/ContainerLogistics.sqlite"
+DEFAULT_INPUT_PATH = "simple_logs/01_o2c.xml"
 DEFAULT_LAYER_CONTEXT = 1
 PRECISION_CONTEXT_SAMPLE_SIZE = 256
 PRECISION_CONTEXT_DEPTH = 5

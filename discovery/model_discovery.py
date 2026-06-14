@@ -419,7 +419,10 @@ class CheckSet:
                 "Filter full layer log",
                 metadata={"activities": len(full_activities)},
             ):
-                full_log = _filter_log_to_activities(log, full_activities)
+                if _log_contains_only_activities(log, full_activities):
+                    full_log = log
+                else:
+                    full_log = _filter_log_to_activities(log, full_activities)
             span.update(postfix="full log filtered")
 
             full_net = self.discovery_technique.mine(full_log)
@@ -874,45 +877,53 @@ class ModelDiscovery:
                         postfix="scope prepared",
                     )
 
-                    with layer_span.child(
-                        "Build full layer log",
-                        metadata={"activities": len(full_activities)},
-                    ):
-                        full_layer_log, _, _ = _build_layer_ocel(
-                            log,
-                            event_records,
-                            object_to_type,
-                            selected_object_types,
-                            full_activities,
-                        )
-                    layer_span.update(postfix="full layer log built")
-
-                    check_set = getattr(self.optimization_function, "check_set", None)
-                    if isinstance(check_set, CheckSet):
-                        check_set.subprocess_activities = candidate_activities
-                        if check_set.use_delta:
-                            check_set.prepare_delta_reference(
-                                full_layer_log,
+                    if candidate_activities:
+                        with layer_span.child(
+                            "Build full layer log",
+                            metadata={"activities": len(full_activities)},
+                        ):
+                            full_layer_log, _, _ = _build_layer_ocel(
+                                log,
+                                event_records,
+                                object_to_type,
+                                selected_object_types,
                                 full_activities,
-                                candidate_activities,
-                                prepare_precision=getattr(
-                                    self.optimization_function,
-                                    "requires_precision_delta_reference",
-                                    True,
-                                ),
                             )
-                    layer_span.update(postfix="delta reference ready")
+                        layer_span.update(postfix="full layer log built")
 
-                    selected_activities = self.optimization_function.optimize(
-                        full_layer_log,
-                        hierarchy,
-                        candidate_activities,
-                        required_activities=native_activities,
-                    )
-                    layer_span.update(
-                        metadata={"selected_activities": len(selected_activities)},
-                        postfix=f"selected={len(selected_activities)}",
-                    )
+                        check_set = getattr(self.optimization_function, "check_set", None)
+                        if isinstance(check_set, CheckSet):
+                            check_set.subprocess_activities = candidate_activities
+                            if check_set.use_delta:
+                                check_set.prepare_delta_reference(
+                                    full_layer_log,
+                                    full_activities,
+                                    candidate_activities,
+                                    prepare_precision=getattr(
+                                        self.optimization_function,
+                                        "requires_precision_delta_reference",
+                                        True,
+                                    ),
+                                )
+                        layer_span.update(postfix="delta reference ready")
+
+                        selected_activities = self.optimization_function.optimize(
+                            full_layer_log,
+                            hierarchy,
+                            candidate_activities,
+                            required_activities=native_activities,
+                        )
+                        layer_span.update(
+                            metadata={"selected_activities": len(selected_activities)},
+                            postfix=f"selected={len(selected_activities)}",
+                        )
+                    else:
+                        selected_activities = native_activities
+                        layer_span.update(
+                            3,
+                            metadata={"selected_activities": len(selected_activities)},
+                            postfix=f"no candidates; selected={len(selected_activities)}",
+                        )
 
                     with layer_span.child(
                         "Build final layer log",
@@ -970,6 +981,16 @@ def _filter_log_to_activities(log, activities: frozenset[str]):
     return _build_ocel_from_filtering_context(
         _filter_ocel_filtering_context(filtering_context, activities)
     )
+
+
+def _log_contains_only_activities(log, activities: frozenset[str]) -> bool:
+    events = getattr(log, "events", None)
+    if events is None or "ocel:activity" not in getattr(events, "columns", ()):
+        return False
+    return {
+        str(activity)
+        for activity in events["ocel:activity"].dropna().unique()
+    } <= activities
 
 
 def _share_checkpoint(component, checkpoint: CheckpointManager) -> None:
