@@ -27,7 +27,6 @@ DEFAULT_INPUT_PATH = "simple_logs/01_o2c.xml"
 DEFAULT_LAYER_CONTEXT = 1
 PRECISION_CONTEXT_SAMPLE_SIZE = 256
 PRECISION_CONTEXT_DEPTH = 5
-PRECISION_CONTEXT_LENGTH = 5
 PRECISION_CONTEXT_SAMPLE_SEED = None
 MAX_NODES_PER_REPLAY = 100
 DEFAULT_LAYERS_OUTPUT = "output/hierarchy_layers.png"
@@ -43,7 +42,6 @@ def build_model_discovery(checkpoint, *, verbose=False):
         PrecisionCalculator(
             PrecisionParameters(
                 d=PRECISION_CONTEXT_DEPTH,
-                l=PRECISION_CONTEXT_LENGTH,
                 replay_budget=MAX_NODES_PER_REPLAY,
                 sample_size=PRECISION_CONTEXT_SAMPLE_SIZE,
                 random_seed=PRECISION_CONTEXT_SAMPLE_SEED,

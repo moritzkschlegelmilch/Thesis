@@ -968,7 +968,6 @@ class SubprocessDetectionTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(precision_bundle)
-        self.assertEqual(captured["kwargs"]["precision_context_length"], 5)
         self.assertEqual(set(captured["ocpn"]["activities"]), {"b", "c"})
         self.assertEqual(
             {
@@ -1081,7 +1080,6 @@ class SubprocessDetectionTests(unittest.TestCase):
                 previous_layer_ocpn=_build_ocpn({"order": previous_net}),
                 precision_context_sample_size=3,
                 precision_context_depth=5,
-                precision_context_length=5,
                 precision_context_sample_seed=11,
             )
 
@@ -1173,7 +1171,6 @@ class SubprocessDetectionTests(unittest.TestCase):
                 previous_layer_ocpn=_build_ocpn({"order": previous_net}),
                 precision_context_sample_size=1,
                 precision_context_depth=5,
-                precision_context_length=5,
                 precision_context_sample_seed=11,
                 show_progress=True,
             )
@@ -2472,7 +2469,6 @@ class SubprocessDetectionTests(unittest.TestCase):
         self.assertEqual(select_patch.call_args.kwargs["precision_bundle"], precision_reference)
         self.assertIs(discovered_models[2]["precision_reference"], precision_reference)
         self.assertEqual(precision_patch.call_args.kwargs["precision_context_depth"], 5)
-        self.assertEqual(precision_patch.call_args.kwargs["precision_context_length"], 5)
 
     def test_layer_discovery_keeps_boundary_activities_attached_to_subprocess_candidates(self):
         ocel = _FakeInputOCEL(

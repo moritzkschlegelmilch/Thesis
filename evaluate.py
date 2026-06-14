@@ -45,7 +45,6 @@ SUPPORTED_LOG_EXTENSIONS = (".sqlite", ".xml", ".xmlocel", ".json", ".jsonocel")
 DEFAULT_LAYER_CONTEXT = 1
 DEFAULT_PRECISION_CONTEXT_SAMPLE_SIZE = 256
 DEFAULT_PRECISION_CONTEXT_DEPTH = 5
-DEFAULT_PRECISION_CONTEXT_LENGTH = 5
 DEFAULT_PRECISION_CONTEXT_SAMPLE_SEED = None
 DEFAULT_MAX_NODES_PER_REPLAY = 100
 
@@ -83,7 +82,6 @@ def build_default_model_discovery(
     verbose: bool = False,
     precision_context_sample_size: int | None = DEFAULT_PRECISION_CONTEXT_SAMPLE_SIZE,
     precision_context_depth: int | None = DEFAULT_PRECISION_CONTEXT_DEPTH,
-    precision_context_length: int | None = DEFAULT_PRECISION_CONTEXT_LENGTH,
     precision_context_sample_seed: int | None = DEFAULT_PRECISION_CONTEXT_SAMPLE_SEED,
     max_nodes_per_replay: int | None = DEFAULT_MAX_NODES_PER_REPLAY,
 ) -> ModelDiscovery:
@@ -94,7 +92,6 @@ def build_default_model_discovery(
         PrecisionCalculator(
             PrecisionParameters(
                 d=precision_context_depth,
-                l=precision_context_length,
                 replay_budget=max_nodes_per_replay,
                 sample_size=precision_context_sample_size,
                 random_seed=precision_context_sample_seed,
@@ -667,11 +664,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=DEFAULT_PRECISION_CONTEXT_DEPTH,
     )
     parser.add_argument(
-        "--precision-context-length",
-        type=int,
-        default=DEFAULT_PRECISION_CONTEXT_LENGTH,
-    )
-    parser.add_argument(
         "--precision-context-sample-seed",
         type=int,
         default=DEFAULT_PRECISION_CONTEXT_SAMPLE_SEED,
@@ -721,7 +713,6 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
             verbose=verbose,
             precision_context_sample_size=args.precision_context_sample_size,
             precision_context_depth=args.precision_context_depth,
-            precision_context_length=args.precision_context_length,
             precision_context_sample_seed=args.precision_context_sample_seed,
             max_nodes_per_replay=args.max_nodes_per_replay,
         ),
