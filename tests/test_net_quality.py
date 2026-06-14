@@ -12,7 +12,7 @@ from pm4py.objects.ocel.obj import OCEL
 from pm4py.objects.petri_net.obj import Marking, PetriNet
 from pm4py.objects.petri_net.utils import petri_utils
 
-from repo.discovery.net_quality import NetQuality, _ReplayEvent
+from repo.discovery.net_quality import NetQuality, _BindingStep, _ReplayEvent
 
 
 def _build_net(name, places, transitions, arcs):
@@ -413,6 +413,83 @@ class NetQualityTests(unittest.TestCase):
             [step.label for step in full_binding],
             ["create", "approve", "complete"],
         )
+
+    def test_prepare_log_can_materialize_replay_lazily(self):
+        ocel = _build_single_type_ocel([
+            ["create", "approve", "complete"],
+        ])
+        quality = NetQuality(_build_flower_ocpn(["create", "approve", "complete"]), ocel)
+
+        prepared = quality._prepare_log(ocel, materialize_replay=False)
+
+        self.assertEqual(prepared["replay"], {})
+        self.assertEqual(sum(prepared["context_weights"].values()), 3)
+
+        selected_context = prepared["ctx"]["e3"]
+        replay = quality._materialize_replay_events(
+            prepared,
+            selected_contexts=(selected_context,),
+        )
+
+        self.assertEqual(tuple(replay), (selected_context,))
+        self.assertEqual(len(replay[selected_context]), 1)
+        self.assertEqual(
+            [step.label for step in replay[selected_context][0].binding_sequence],
+            ["create", "approve"],
+        )
+
+    def test_replay_cache_alpha_normalizes_object_ids(self):
+        quality = NetQuality(_build_flower_ocpn(["a"]))
+
+        def replay_event(object_id):
+            token = ("order", object_id)
+            return _ReplayEvent(
+                context_key=(),
+                binding_sequence=(
+                    _BindingStep(
+                        label="a",
+                        objects_by_type=(("order", (token,)),),
+                    ),
+                ),
+                context_tokens_by_type=(("order", (token,)),),
+            )
+
+        self.assertEqual(quality._replay(replay_event("order_1")), frozenset({"a"}))
+        self.assertEqual(len(quality._replay_cache), 1)
+        self.assertEqual(len(quality._terminal_replay_cache), 1)
+
+        self.assertEqual(quality._replay(replay_event("order_99")), frozenset({"a"}))
+        self.assertEqual(len(quality._replay_cache), 1)
+        self.assertEqual(len(quality._terminal_replay_cache), 1)
+
+    def test_replay_alpha_normalization_preserves_object_equality(self):
+        quality = NetQuality(_build_flower_ocpn(["a", "b"]))
+
+        def signature(event):
+            return quality._replay_signature(quality._canonical_replay_event(event))
+
+        same_token = ("order", "order_1")
+        first_token = ("order", "order_1")
+        second_token = ("order", "order_2")
+
+        same_object_event = _ReplayEvent(
+            context_key=(),
+            binding_sequence=(
+                _BindingStep("a", (("order", (same_token,)),)),
+                _BindingStep("b", (("order", (same_token,)),)),
+            ),
+            context_tokens_by_type=(("order", (same_token,)),),
+        )
+        different_object_event = _ReplayEvent(
+            context_key=(),
+            binding_sequence=(
+                _BindingStep("a", (("order", (first_token,)),)),
+                _BindingStep("b", (("order", (second_token,)),)),
+            ),
+            context_tokens_by_type=(("order", (first_token, second_token)),),
+        )
+
+        self.assertNotEqual(signature(same_object_event), signature(different_object_event))
 
     def test_progress_output_can_be_enabled(self):
         ocel = _build_single_type_ocel([

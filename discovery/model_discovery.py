@@ -186,7 +186,7 @@ class PrecisionCalculator:
             return None
         with self.checkpoint.section(
             "Prepare precision delta context",
-            total=4,
+            total=6,
             metadata={
                 **_log_metadata(log),
                 "sample_size": self.parameters.sample_size,
@@ -201,45 +201,90 @@ class PrecisionCalculator:
                 precision_context_depth=self.parameters.d,
                 random_seed=self.parameters.random_seed,
             )
-            prepared_original = quality._prepare_log(log)
-            exact_context_weights = _context_weights(prepared_original)
-            sampled_context_weights = _sample_context_draw_counts(
-                exact_context_weights,
-                self.parameters.sample_size,
-                random_seed=self.parameters.random_seed,
-            )
-            context_weights = sampled_context_weights or exact_context_weights
-            sampled_contexts = tuple(
-                ctx
-                for ctx in prepared_original["replay"]
-                if ctx in context_weights
-            )
-            selected_contexts = sampled_contexts if sampled_context_weights is not None else None
-            span.update(postfix=f"contexts={len(context_weights)}")
+            with span.child("Prepare precision context keys"):
+                prepared_original = quality._prepare_log(
+                    log,
+                    materialize_replay=False,
+                )
+                exact_context_weights = _context_weights(prepared_original)
+            span.update(postfix=f"contexts={len(exact_context_weights)}")
 
-            terminal_states_by_context = _build_terminal_states_by_context(
-                quality,
-                prepared_original,
-                selected_contexts=selected_contexts,
-                show_progress=False,
-            )
+            with span.child(
+                "Sample precision contexts",
+                metadata={"sample_size": self.parameters.sample_size},
+            ) as sample_span:
+                sampled_context_weights = _sample_context_draw_counts(
+                    exact_context_weights,
+                    self.parameters.sample_size,
+                    random_seed=self.parameters.random_seed,
+                )
+                context_weights = sampled_context_weights or exact_context_weights
+                sampled_contexts = tuple(
+                    ctx
+                    for ctx in exact_context_weights
+                    if ctx in context_weights
+                )
+                selected_contexts = (
+                    sampled_contexts
+                    if sampled_context_weights is not None
+                    else None
+                )
+                sample_span.update(
+                    metadata={
+                        "contexts": len(context_weights),
+                        "selected_contexts": len(sampled_contexts),
+                    },
+                    postfix=f"contexts={len(context_weights)}",
+                )
+            span.update(postfix=f"selected={len(sampled_contexts)}")
+
+            with span.child("Materialize precision replay events") as replay_span:
+                replay = quality._materialize_replay_events(
+                    prepared_original,
+                    selected_contexts=selected_contexts,
+                )
+                selected_context_set = (
+                    None
+                    if selected_contexts is None
+                    else set(selected_contexts)
+                )
+                replay_event_count = sum(
+                    len(events)
+                    for ctx, events in replay.items()
+                    if selected_context_set is None or ctx in selected_context_set
+                )
+                replay_span.update(
+                    metadata={"replay_events": replay_event_count},
+                    postfix=f"events={replay_event_count}",
+                )
+            span.update(postfix=f"replay_events={replay_event_count}")
+
+            with span.child("Replay precision terminal states"):
+                terminal_states_by_context = _build_terminal_states_by_context(
+                    quality,
+                    prepared_original,
+                    selected_contexts=selected_contexts,
+                    show_progress=False,
+                )
             span.update(postfix="terminal states cached")
 
-            original_enabled_by_context = _enabled_labels_by_context_from_terminal_states(
-                quality,
-                terminal_states_by_context,
-            )
-            baseline_enabled_mass = _enabled_mass_by_context(
-                context_weights,
-                original_enabled_by_context,
-            )
+            with span.child("Cache precision enabled labels"):
+                original_enabled_by_context = _enabled_labels_by_context_from_terminal_states(
+                    quality,
+                    terminal_states_by_context,
+                )
+                baseline_enabled_mass = _enabled_mass_by_context(
+                    context_weights,
+                    original_enabled_by_context,
+                )
             span.update(postfix="enabled labels cached")
 
-            precision = _precision_from_prepared(
-                prepared_original,
-                original_enabled_by_context,
-                context_weights=context_weights,
-            )
+            with span.child("Aggregate precision baseline"):
+                precision = _precision_from_prepared(
+                    prepared_original,
+                    original_enabled_by_context,
+                    context_weights=context_weights,
+                )
             span.update(postfix=f"precision={precision:.3f}")
 
             return {

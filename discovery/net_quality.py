@@ -303,7 +303,15 @@ class NetQuality:
         compute_fitness=True,
     ):
         ocel = ocel or self.ocel
-        prepared = self._prepare_log(ocel, show_progress=show_progress)
+        prepared = self._prepare_log(
+            ocel,
+            show_progress=show_progress,
+            materialize_replay=not (
+                compute_precision
+                and self.precision_context_sample_size is not None
+                and not compute_fitness
+            ),
+        )
 
         precision = 0.0
         fitness = 0.0
@@ -425,13 +433,17 @@ class NetQuality:
         show_progress=False,
         progress_desc="Replaying contexts",
     ):
+        replay = self._materialize_replay_events(
+            prepared,
+            selected_contexts=selected_contexts,
+        )
         if selected_contexts is None:
-            context_items = tuple(prepared["replay"].items())
+            context_items = tuple(replay.items())
         else:
             selected_context_set = set(selected_contexts)
             context_items = tuple(
                 (ctx, events)
-                for ctx, events in prepared["replay"].items()
+                for ctx, events in replay.items()
                 if ctx in selected_context_set
             )
 
@@ -459,6 +471,9 @@ class NetQuality:
         return model_enabled
 
     def _context_weights(self, prepared):
+        if "context_weights" in prepared:
+            return dict(prepared["context_weights"])
+
         return {
             ctx: len(events)
             for ctx, events in prepared["replay"].items()
@@ -484,6 +499,7 @@ class NetQuality:
     # OCPA-STYLE REPLAY
     # -------------------------
     def _replay_terminal_states(self, ev):
+        ev = self._canonical_replay_event(ev)
         replay_key = self._replay_signature(ev)
 
         if replay_key in self._terminal_replay_cache:
@@ -526,6 +542,7 @@ class NetQuality:
         return result
 
     def _replay(self, ev):
+        ev = self._canonical_replay_event(ev)
         replay_key = self._replay_signature(ev)
 
         if replay_key in self._replay_cache:
@@ -538,6 +555,49 @@ class NetQuality:
         result = frozenset(enabled)
         self._replay_cache[replay_key] = result
         return result
+
+    def _canonical_replay_event(self, ev):
+        token_map = {}
+        token_counters = defaultdict(int)
+
+        def canonical_token(token):
+            ot, oid = token
+            ot = str(ot)
+            key = (ot, oid)
+            if key not in token_map:
+                token_map[key] = (ot, token_counters[ot])
+                token_counters[ot] += 1
+            return token_map[key]
+
+        def canonical_objects(objects_by_type):
+            canonical = []
+
+            for ot, tokens in objects_by_type:
+                normalized_tokens = tuple(
+                    sorted(
+                        (canonical_token(token) for token in tokens),
+                        key=self._token_sort_key,
+                    )
+                )
+                if normalized_tokens:
+                    canonical.append((str(ot), normalized_tokens))
+
+            return tuple(canonical)
+
+        binding_sequence = tuple(
+            _BindingStep(
+                label=step.label,
+                objects_by_type=canonical_objects(step.objects_by_type),
+            )
+            for step in ev.binding_sequence
+        )
+        context_tokens_by_type = canonical_objects(ev.context_tokens_by_type)
+
+        return _ReplayEvent(
+            context_key=ev.context_key,
+            binding_sequence=binding_sequence,
+            context_tokens_by_type=context_tokens_by_type,
+        )
 
     def _replay_signature(self, ev):
         def objects_sig(objects_by_type):
@@ -839,7 +899,7 @@ class NetQuality:
     # -------------------------
     # OCPA-STYLE LOG PREPARATION
     # -------------------------
-    def _prepare_log(self, ocel, show_progress=False):
+    def _prepare_log(self, ocel, show_progress=False, *, materialize_replay=True):
         if ocel is None:
             raise ValueError("No OCEL was provided.")
         if self.precision_context_depth is not None and self.precision_context_depth < 0:
@@ -919,18 +979,10 @@ class NetQuality:
                 ancestor_depths[e] = depths
                 presets[e] = frozenset(depths)
 
-        objects_by_type_cache = {}
-
-        def objects_by_type_for_event(event_id):
-            if event_id not in objects_by_type_cache:
-                objects_by_type_cache[event_id] = self._group_event_tokens_by_type(
-                    event_tokens.get(event_id, ())
-                )
-            return objects_by_type_cache[event_id]
-
         ctx = {}
         log_enabled = defaultdict(set)
-        replay = defaultdict(list)
+        context_weights = defaultdict(int)
+        events_by_context = defaultdict(list)
 
         ordered_iter = ordered
         if show_progress:
@@ -975,31 +1027,98 @@ class NetQuality:
                 )
             )
 
-            binding_sequence = tuple(
-                _BindingStep(
-                    label=act_map[pe],
-                    objects_by_type=objects_by_type_for_event(pe),
-                )
-                for pe in preset_ordered
-            )
-
             ctx[e] = key
             log_enabled[key].add(act_map[e])
+            context_weights[key] += 1
+            events_by_context[key].append(e)
 
-            replay[key].append(
-                _ReplayEvent(
-                    context_key=key,
-                    binding_sequence=binding_sequence,
-                    context_tokens_by_type=self._group_event_tokens_by_type(context_tokens),
-                )
-            )
-
-        return {
+        prepared = {
             "events": ordered,
             "ctx": ctx,
             "log": {
                 k: frozenset(v)
                 for k, v in log_enabled.items()
             },
-            "replay": replay,
+            "context_weights": dict(context_weights),
+            "events_by_context": {
+                k: tuple(v)
+                for k, v in events_by_context.items()
+            },
+            "replay": {},
+            "_replay_data": {
+                "act_map": act_map,
+                "event_order_index": event_order_index,
+                "event_tokens": {
+                    event_id: tuple(tokens)
+                    for event_id, tokens in event_tokens.items()
+                },
+                "presets": presets,
+                "objects_by_type_cache": {},
+            },
         }
+
+        if materialize_replay:
+            self._materialize_replay_events(prepared)
+
+        return prepared
+
+    def _materialize_replay_events(self, prepared, *, selected_contexts=None):
+        replay = prepared.setdefault("replay", {})
+        replay_data = prepared.get("_replay_data")
+        if replay_data is None:
+            return replay
+
+        events_by_context = prepared.get("events_by_context", {})
+        if selected_contexts is None:
+            selected_context_keys = tuple(events_by_context)
+        else:
+            selected_context_set = set(selected_contexts)
+            selected_context_keys = tuple(
+                ctx
+                for ctx in events_by_context
+                if ctx in selected_context_set
+            )
+
+        act_map = replay_data["act_map"]
+        event_order_index = replay_data["event_order_index"]
+        event_tokens = replay_data["event_tokens"]
+        presets = replay_data["presets"]
+        objects_by_type_cache = replay_data["objects_by_type_cache"]
+
+        def objects_by_type_for_event(event_id):
+            if event_id not in objects_by_type_cache:
+                objects_by_type_cache[event_id] = self._group_event_tokens_by_type(
+                    event_tokens.get(event_id, ())
+                )
+            return objects_by_type_cache[event_id]
+
+        for ctx in selected_context_keys:
+            if ctx in replay:
+                continue
+
+            replay_events = []
+            for e in events_by_context.get(ctx, ()):
+                preset_events = presets[e]
+                preset_ordered = tuple(sorted(preset_events, key=event_order_index.__getitem__))
+                context_tokens = set(event_tokens.get(e, ()))
+                for pe in preset_events:
+                    context_tokens.update(event_tokens.get(pe, ()))
+
+                binding_sequence = tuple(
+                    _BindingStep(
+                        label=act_map[pe],
+                        objects_by_type=objects_by_type_for_event(pe),
+                    )
+                    for pe in preset_ordered
+                )
+                replay_events.append(
+                    _ReplayEvent(
+                        context_key=ctx,
+                        binding_sequence=binding_sequence,
+                        context_tokens_by_type=self._group_event_tokens_by_type(context_tokens),
+                    )
+                )
+
+            replay[ctx] = tuple(replay_events)
+
+        return replay

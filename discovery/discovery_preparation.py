@@ -993,12 +993,20 @@ def _build_model_enabled_by_context(
     model_enabled = {}
 
     selected_context_set = None if selected_contexts is None else set(selected_contexts)
+    if hasattr(quality, "_materialize_replay_events"):
+        replay = quality._materialize_replay_events(
+            prepared,
+            selected_contexts=selected_contexts,
+        )
+    else:
+        replay = prepared["replay"]
+
     if selected_context_set is None:
-        replay_items = tuple(prepared["replay"].items())
+        replay_items = tuple(replay.items())
     else:
         replay_items = tuple(
             (ctx, events)
-            for ctx, events in prepared["replay"].items()
+            for ctx, events in replay.items()
             if ctx in selected_context_set
         )
 
@@ -1111,12 +1119,20 @@ def _build_terminal_states_by_context(
     terminal_states_by_context = {}
 
     selected_context_set = None if selected_contexts is None else set(selected_contexts)
+    if hasattr(quality, "_materialize_replay_events"):
+        replay = quality._materialize_replay_events(
+            prepared,
+            selected_contexts=selected_contexts,
+        )
+    else:
+        replay = prepared["replay"]
+
     if selected_context_set is None:
-        replay_items = tuple(prepared["replay"].items())
+        replay_items = tuple(replay.items())
     else:
         replay_items = tuple(
             (ctx, events)
-            for ctx, events in prepared["replay"].items()
+            for ctx, events in replay.items()
             if ctx in selected_context_set
         )
 
@@ -1242,6 +1258,19 @@ def _virtual_reduction_enabled_labels_by_context(precision_bundle, affected_labe
     return reduced_enabled_by_context
 
 
+def _prepare_log_for_precision(quality, ocel, *, show_progress=False, materialize_replay=True):
+    try:
+        return quality._prepare_log(
+            ocel,
+            show_progress=show_progress,
+            materialize_replay=materialize_replay,
+        )
+    except TypeError as exc:
+        if "materialize_replay" not in str(exc):
+            raise
+        return quality._prepare_log(ocel, show_progress=show_progress)
+
+
 def _build_precision_reference_bundle(
     source_ocel,
     event_records,
@@ -1302,7 +1331,12 @@ def _build_precision_reference_bundle(
         precision_context_depth=precision_context_depth,
         random_seed=precision_context_sample_seed,
     )
-    prepared_original = quality._prepare_log(merged_ocel, show_progress=show_progress)
+    prepared_original = _prepare_log_for_precision(
+        quality,
+        merged_ocel,
+        show_progress=show_progress,
+        materialize_replay=precision_context_sample_size is None,
+    )
     exact_context_weights = _context_weights(prepared_original)
     sampled_context_weights = _sample_context_draw_counts(
         exact_context_weights,
@@ -1312,7 +1346,7 @@ def _build_precision_reference_bundle(
     context_weights = sampled_context_weights or exact_context_weights
     sampled_contexts = tuple(
         ctx
-        for ctx in prepared_original["replay"]
+        for ctx in exact_context_weights
         if ctx in context_weights
     )
     if show_progress:
@@ -1362,7 +1396,12 @@ def _build_precision_reference_bundle(
             "replay": {},
         }
     else:
-        reduced_prepared = quality._prepare_log(reduced_log_ocel, show_progress=show_progress)
+        reduced_prepared = _prepare_log_for_precision(
+            quality,
+            reduced_log_ocel,
+            show_progress=show_progress,
+            materialize_replay=False,
+        )
 
     return {
         "quality": quality,
