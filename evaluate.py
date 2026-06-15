@@ -50,7 +50,7 @@ DEFAULT_PRECISION_CONTEXT_SAMPLE_SIZE = 512
 DEFAULT_PRECISION_CONTEXT_DEPTH = 5
 DEFAULT_PRECISION_CONTEXT_SAMPLE_SEED = None
 DEFAULT_MAX_NODES_PER_REPLAY = 128
-DEFAULT_QUALITY_TIMEOUT_SECONDS = 10 * 60
+DEFAULT_QUALITY_TIMEOUT_SECONDS = 1000
 
 
 LayerContext = int | Iterable[int] | Callable[[LayerAssignment, Any, Path], Iterable[int]]
@@ -300,6 +300,9 @@ def evaluate_log(
                 hierarchy_stats = _summarize_hierarchy(hierarchy)
                 span.update(postfix=f"areas={hierarchy_stats.get('areas')}")
 
+            artifacts = _render_artifacts(input_path, output_dir, hierarchy)
+            span.update(postfix="visualizations saved")
+
             if skip_quality:
                 quality_data = {"skipped": True}
                 span.update(postfix="quality skipped")
@@ -318,9 +321,6 @@ def evaluate_log(
                     quality = evaluator.evaluate(quality_log, hierarchy)
                     quality_data = _quality_to_dict(quality)
                     span.update(postfix=f"quality={quality.quality:.3f}")
-
-            artifacts = _render_artifacts(input_path, output_dir, hierarchy)
-            span.update(postfix="visualizations saved")
 
             summary = {
                 "status": "ok",
@@ -413,7 +413,24 @@ def _failure_summary(
         summary["timeout_seconds"] = timeout_seconds
     if timeout_operation is not None:
         summary["timeout_operation"] = timeout_operation
+    artifacts = _existing_artifacts(output_dir)
+    if artifacts:
+        summary["partial"] = True
+        summary["artifacts"] = artifacts
     return summary
+
+
+def _existing_artifacts(output_dir: Path) -> dict[str, str]:
+    candidates = {
+        "layers": output_dir / "hierarchy_layers.png",
+        "hierarchy": output_dir / "hierarchy.png",
+        "hierarchy_subprocesses": output_dir / "hierarchy_subprocesses.png",
+    }
+    return {
+        key: str(path)
+        for key, path in candidates.items()
+        if path.exists()
+    }
 
 
 @contextmanager
@@ -770,12 +787,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--quality-timeout-minutes",
         type=float,
-        help="Mark quality calculation as failed after this many minutes. Defaults to 10.",
+        help="Mark quality calculation as failed after this many minutes. Defaults to 16.67.",
     )
     parser.add_argument(
         "--quality-timeout-seconds",
         type=float,
-        help="Mark quality calculation as failed after this many seconds. Defaults to 600.",
+        help="Mark quality calculation as failed after this many seconds. Defaults to 1000.",
     )
     return parser
 

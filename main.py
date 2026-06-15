@@ -24,12 +24,12 @@ from helpers.vorbose import (
 from totem_lib import import_ocel
 
 
-DEFAULT_INPUT_PATH = "simple_logs/02_p2p.xml"
+DEFAULT_INPUT_PATH = "simple_logs/01_o2c.xml"
 DEFAULT_LAYER_CONTEXT = 1
-PRECISION_CONTEXT_SAMPLE_SIZE = 512
-PRECISION_CONTEXT_DEPTH = 5
+PRECISION_CONTEXT_SAMPLE_SIZE = 256
+PRECISION_CONTEXT_DEPTH = 3
 PRECISION_CONTEXT_SAMPLE_SEED = None
-MAX_NODES_PER_REPLAY = 128
+MAX_NODES_PER_REPLAY = 100
 DEFAULT_LAYERS_OUTPUT = "output/hierarchy_layers.png"
 DEFAULT_MODEL_OUTPUT = "output/hierarchy_with_models.png"
 DEFAULT_SUBPROCESS_OUTPUT = "output/hierarchy_with_subprocesses.png"
