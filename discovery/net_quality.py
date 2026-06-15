@@ -111,6 +111,81 @@ class NetQuality:
             compute_fitness=False,
         ).precision
 
+    def precision_from_prepared(
+        self,
+        prepared,
+        *,
+        sample_counts=None,
+        show_progress=False,
+    ) -> float:
+        if sample_counts is None and self.precision_context_sample_size is not None:
+            sample_counts = self._sample_precision_context_draw_counts(prepared)
+
+        if sample_counts is not None:
+            model_enabled = self._build_model_enabled_by_context(
+                prepared,
+                selected_contexts=sample_counts,
+                show_progress=show_progress,
+                progress_desc="Replaying sampled contexts",
+            )
+
+            weighted_precision = 0.0
+            sampled_precision_events = 0
+            sampled_iter = sample_counts.items()
+            if show_progress:
+                sampled_iter = tqdm(
+                    sampled_iter,
+                    total=len(sample_counts),
+                    desc="Aggregating sampled precision",
+                    file=sys.stdout,
+                )
+
+            for ctx, draw_count in sampled_iter:
+                log = prepared["log"].get(ctx, frozenset())
+                model = model_enabled.get(ctx, frozenset())
+                overlap = log & model
+                if not model or not overlap:
+                    continue
+
+                weighted_precision += draw_count * (len(overlap) / len(model))
+                sampled_precision_events += draw_count
+
+            return (
+                weighted_precision / sampled_precision_events
+                if sampled_precision_events
+                else 0.0
+            )
+
+        model_enabled = self._build_model_enabled_by_context(
+            prepared,
+            show_progress=show_progress,
+        )
+        context_weights = self._context_weights(prepared)
+        weighted_precision = 0.0
+        precision_weight = 0
+
+        context_iter = context_weights.items()
+        if show_progress:
+            context_iter = tqdm(
+                context_iter,
+                total=len(context_weights),
+                desc="Aggregating scores",
+                file=sys.stdout,
+            )
+
+        for ctx, weight in context_iter:
+            log = prepared["log"].get(ctx, frozenset())
+            model = model_enabled.get(ctx, frozenset())
+            overlap = log & model
+
+            if not model or not overlap:
+                continue
+
+            weighted_precision += weight * (len(overlap) / len(model))
+            precision_weight += weight
+
+        return weighted_precision / precision_weight if precision_weight else 0.0
+
     def fitness(self, ocel=None, *, show_progress=False):
         return self._evaluate(
             ocel,

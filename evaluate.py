@@ -44,10 +44,10 @@ from totem_lib import import_ocel
 
 SUPPORTED_LOG_EXTENSIONS = (".sqlite", ".xml", ".xmlocel", ".json", ".jsonocel")
 DEFAULT_LAYER_CONTEXT = 1
-DEFAULT_PRECISION_CONTEXT_SAMPLE_SIZE = 64
-DEFAULT_PRECISION_CONTEXT_DEPTH = 2
+DEFAULT_PRECISION_CONTEXT_SAMPLE_SIZE = 512
+DEFAULT_PRECISION_CONTEXT_DEPTH = 5
 DEFAULT_PRECISION_CONTEXT_SAMPLE_SEED = None
-DEFAULT_MAX_NODES_PER_REPLAY = 25
+DEFAULT_MAX_NODES_PER_REPLAY = 128
 
 
 LayerContext = int | Iterable[int] | Callable[[LayerAssignment, Any, Path], Iterable[int]]
@@ -73,7 +73,7 @@ def build_default_layer_miner(
             DivergenceScorer(1),
         ],
         alpha=1.0,
-        beta=2.0,
+        beta=1.0,
         checkpoint=checkpoint,
         verbose=verbose,
     )
@@ -287,7 +287,7 @@ def evaluate_log(
                     verbose=verbose,
                 )
                 quality_log = _quality_log(ocel)
-                quality = evaluator.evaluate(quality_log, hierarchy)
+                quality = evaluator.evaluate(quality_log, hierarchy, delta)
                 quality_data = _quality_to_dict(quality)
                 span.update(postfix=f"quality={quality.quality:.3f}")
 

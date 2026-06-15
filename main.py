@@ -2,12 +2,12 @@ from discovery import (
     CheckSet,
     CheckpointManager,
     CollapsedNetBuilder,
-    # GreedyOptimization,
+    GreedyOptimization,
     LayerAssignmentMiner,
     ModelDiscovery,
     PM4PyOCPNDiscovery,
-    # PrecisionCalculator,
-    # PrecisionParameters,
+    PrecisionCalculator,
+    PrecisionParameters,
     SubprocessMoveUpOptimization,
     SubprocessMiner,
 )
@@ -24,49 +24,50 @@ from helpers.vorbose import (
 from totem_lib import import_ocel
 
 
-DEFAULT_INPUT_PATH = "simple_logs/angular_github_commits_ocel.xml"
+DEFAULT_INPUT_PATH = "simple_logs/socel2_hinge.xml"
 DEFAULT_LAYER_CONTEXT = 1
-# PRECISION_CONTEXT_SAMPLE_SIZE = 256
-# PRECISION_CONTEXT_DEPTH = 5
-# PRECISION_CONTEXT_SAMPLE_SEED = None
-# MAX_NODES_PER_REPLAY = 100
+PRECISION_CONTEXT_SAMPLE_SIZE = 512
+PRECISION_CONTEXT_DEPTH = 5
+PRECISION_CONTEXT_SAMPLE_SEED = None
+MAX_NODES_PER_REPLAY = 128
 DEFAULT_LAYERS_OUTPUT = "output/hierarchy_layers.png"
 DEFAULT_MODEL_OUTPUT = "output/hierarchy_with_models.png"
 DEFAULT_SUBPROCESS_OUTPUT = "output/hierarchy_with_subprocesses.png"
 
 
 def build_model_discovery(checkpoint, *, verbose=False):
-    # check_set = CheckSet(
-    #     PM4PyOCPNDiscovery(checkpoint=checkpoint, verbose=verbose),
-    #     SubprocessMiner(checkpoint=checkpoint, verbose=verbose),
-    #     CollapsedNetBuilder(checkpoint=checkpoint, verbose=verbose),
-    #     PrecisionCalculator(
-    #         PrecisionParameters(
-    #             d=PRECISION_CONTEXT_DEPTH,
-    #             replay_budget=MAX_NODES_PER_REPLAY,
-    #             sample_size=PRECISION_CONTEXT_SAMPLE_SIZE,
-    #             random_seed=PRECISION_CONTEXT_SAMPLE_SEED,
-    #         ),
-    #         checkpoint=checkpoint,
-    #         verbose=verbose,
-    #     ),
-    #     use_delta=True,
-    #     checkpoint=checkpoint,
-    #     verbose=verbose,
-    # )
-    subprocess_check_set = CheckSet(
+    check_set = CheckSet(
         PM4PyOCPNDiscovery(checkpoint=checkpoint, verbose=verbose),
         SubprocessMiner(checkpoint=checkpoint, verbose=verbose),
         CollapsedNetBuilder(checkpoint=checkpoint, verbose=verbose),
-        None,
+        PrecisionCalculator(
+            PrecisionParameters(
+                d=PRECISION_CONTEXT_DEPTH,
+                replay_budget=MAX_NODES_PER_REPLAY,
+                sample_size=PRECISION_CONTEXT_SAMPLE_SIZE,
+                random_seed=PRECISION_CONTEXT_SAMPLE_SEED,
+            ),
+            checkpoint=checkpoint,
+            verbose=verbose,
+        ),
         use_delta=True,
         checkpoint=checkpoint,
         verbose=verbose,
     )
+    # subprocess_check_set = CheckSet(
+    #     PM4PyOCPNDiscovery(checkpoint=checkpoint, verbose=verbose),
+    #     SubprocessMiner(checkpoint=checkpoint, verbose=verbose),
+    #     CollapsedNetBuilder(checkpoint=checkpoint, verbose=verbose),
+    #     None,
+    #     use_delta=True,
+    #     checkpoint=checkpoint,
+    #     verbose=verbose,
+    # )
 
     return ModelDiscovery(
         PM4PyOCPNDiscovery(checkpoint=checkpoint, verbose=verbose),
-        SubprocessMoveUpOptimization(subprocess_check_set, checkpoint=checkpoint, verbose=verbose),
+        #SubprocessMoveUpOptimization(subprocess_check_set, checkpoint=checkpoint, verbose=verbose),
+        GreedyOptimization(check_set, checkpoint=checkpoint, verbose=verbose),
         subprocess_miner=SubprocessMiner(checkpoint=checkpoint, verbose=verbose),
         alpha_decision_parameter=0.5,
         checkpoint=checkpoint,

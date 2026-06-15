@@ -159,7 +159,47 @@ class PrecisionCalculator:
         self.parameters = parameters or PrecisionParameters()
         self.checkpoint = checkpoint or CheckpointManager(verbose=verbose)
 
-    def precision(self, log, net_or_hierarchy) -> float:
+    def prepare_log_context(self, log) -> dict[str, Any]:
+        with self.checkpoint.section(
+            "Prepare shared precision log context",
+            metadata={
+                **_log_metadata(log),
+                "sample_size": self.parameters.sample_size,
+                "depth": self.parameters.d,
+            },
+        ) as span:
+            quality = NetQuality(
+                {},
+                log,
+                max_nodes_per_replay=self.parameters.replay_budget or 1000,
+                precision_context_sample_size=self.parameters.sample_size,
+                precision_context_depth=self.parameters.d,
+                random_seed=self.parameters.random_seed,
+            )
+            prepared = quality._prepare_log(log, materialize_replay=False)
+            sample_counts = (
+                quality._sample_precision_context_draw_counts(prepared)
+                if self.parameters.sample_size is not None
+                else None
+            )
+            selected_contexts = sample_counts if sample_counts is not None else None
+            quality._materialize_replay_events(
+                prepared,
+                selected_contexts=selected_contexts,
+            )
+            span.update(
+                metadata={
+                    "contexts": len(prepared.get("context_weights", {})),
+                    "sampled_contexts": len(sample_counts or {}),
+                },
+                postfix=f"contexts={len(prepared.get('context_weights', {}))}",
+            )
+            return {
+                "prepared": prepared,
+                "sample_counts": sample_counts,
+            }
+
+    def precision(self, log, net_or_hierarchy, *, prepared_context: dict[str, Any] | None = None) -> float:
         net = self._as_net(net_or_hierarchy)
         if net is None:
             return 0.0
@@ -172,14 +212,20 @@ class PrecisionCalculator:
                 "depth": self.parameters.d,
             },
         ):
-            return float(NetQuality(
+            quality = NetQuality(
                 net.raw,
                 log,
                 max_nodes_per_replay=self.parameters.replay_budget or 1000,
                 precision_context_sample_size=self.parameters.sample_size,
                 precision_context_depth=self.parameters.d,
                 random_seed=self.parameters.random_seed,
-            ).precision())
+            )
+            if prepared_context is not None:
+                return float(quality.precision_from_prepared(
+                    prepared_context["prepared"],
+                    sample_counts=prepared_context.get("sample_counts"),
+                ))
+            return float(quality.precision())
 
     def prepare_delta(self, log, full_net: AcceptingOCPN | None) -> Any:
         if full_net is None:
@@ -359,11 +405,21 @@ class HierarchyQualityEvaluator:
         self.precision_calculator = precision_calculator
         self.checkpoint = checkpoint or CheckpointManager(verbose=verbose)
 
-    def evaluate(self, log, hierarchy: AdvancedProcessAreaHierarchy) -> QualityScores:
+    def evaluate(
+        self,
+        log,
+        hierarchy: AdvancedProcessAreaHierarchy,
+        layer_context: list[int] | tuple[int, ...] | None = None,
+    ) -> QualityScores:
+        if layer_context is not None:
+            return self._evaluate_windowed(log, hierarchy, layer_context)
+        return self._evaluate_global(log, hierarchy)
+
+    def _evaluate_global(self, log, hierarchy: AdvancedProcessAreaHierarchy) -> QualityScores:
         with self.checkpoint.section(
             "Evaluate hierarchy quality",
             total=5,
-            metadata={"areas": len(hierarchy.areas)},
+            metadata={"areas": len(hierarchy.areas), "mode": "global"},
         ) as span:
             baseline_net = self.discovery_technique.mine(log)
             span.update(postfix="baseline net mined")
@@ -403,6 +459,156 @@ class HierarchyQualityEvaluator:
             )
             quality = _f1_quality(simplicity_gain, information_loss)
             span.update(postfix=f"quality={quality:.3f}")
+            return QualityScores(
+                simplicity_gain=simplicity_gain,
+                information_loss=information_loss,
+                quality=quality,
+                precision=precision,
+                complexity=complexity,
+            )
+
+    def _evaluate_windowed(
+        self,
+        log,
+        hierarchy: AdvancedProcessAreaHierarchy,
+        layer_context: list[int] | tuple[int, ...],
+    ) -> QualityScores:
+        areas = tuple(hierarchy.areas)
+        if not areas:
+            return QualityScores(0.0, 1.0, 0.0, 0.0, 0.0)
+
+        delta_by_layer = _normalize_quality_layer_context(len(areas), layer_context)
+        object_to_type, event_records = _extract_ocel_filtering_context(log)
+
+        weighted_baseline_complexity = 0.0
+        weighted_complexity = 0.0
+        weighted_baseline_precision = 0.0
+        weighted_precision = 0.0
+        total_weight = 0.0
+
+        with self.checkpoint.section(
+            "Evaluate hierarchy quality",
+            total=len(areas),
+            metadata={
+                "areas": len(areas),
+                "mode": "windowed",
+            },
+        ) as span:
+            for layer, _ in enumerate(areas, start=1):
+                delta_value = delta_by_layer[layer - 1]
+                first_layer = max(1, layer - delta_value)
+                window_areas = areas[first_layer - 1:layer]
+                window_activities = frozenset(
+                    activity
+                    for area in window_areas
+                    for activity in area.activities
+                )
+                window_object_types = frozenset(
+                    object_type
+                    for area in window_areas
+                    for object_type in area.object_types
+                )
+
+                with span.child(
+                    f"Evaluate layer {layer} quality window",
+                    total=6,
+                    metadata={
+                        "layer": layer,
+                        "from_layer": first_layer,
+                        "delta": delta_value,
+                        "activities": len(window_activities),
+                        "object_types": len(window_object_types),
+                    },
+                ) as layer_span:
+                    if not window_activities or not window_object_types:
+                        layer_span.update(6, postfix="empty window skipped")
+                        span.update(postfix=f"layer {layer} skipped")
+                        continue
+
+                    with layer_span.child("Build quality window log"):
+                        window_log, _, included_activities = _build_layer_ocel(
+                            log,
+                            event_records,
+                            object_to_type,
+                            window_object_types,
+                            window_activities,
+                        )
+                    window_weight = float(_safe_len(getattr(window_log, "events", None)) or 0)
+                    layer_span.update(
+                        metadata={
+                            "events": int(window_weight),
+                            "included_activities": len(included_activities),
+                        },
+                        postfix=f"events={int(window_weight)}",
+                    )
+                    if window_weight <= 0:
+                        layer_span.update(5, postfix="empty log skipped")
+                        span.update(postfix=f"layer {layer} skipped")
+                        continue
+
+                    with layer_span.child("Prepare shared precision contexts"):
+                        prepared_context = self.precision_calculator.prepare_log_context(window_log)
+                    layer_span.update(postfix="contexts ready")
+
+                    baseline_net = self.discovery_technique.mine(window_log)
+                    layer_span.update(postfix="baseline net mined")
+
+                    with layer_span.child("Compute baseline window quality"):
+                        baseline_complexity = _complexity(baseline_net)
+                        baseline_precision = self.precision_calculator.precision(
+                            window_log,
+                            baseline_net,
+                            prepared_context=prepared_context,
+                        )
+                    layer_span.update(postfix=f"baseline precision={baseline_precision:.3f}")
+
+                    with layer_span.child("Merge hierarchy window nets"):
+                        collapsed_hierarchy_net = _merge_area_nets(
+                            window_areas,
+                            collapse=True,
+                            collapsed_net_builder=self.collapsed_net_builder,
+                        )
+                        hierarchy_net = _merge_area_nets(
+                            window_areas,
+                            collapse=False,
+                            collapsed_net_builder=self.collapsed_net_builder,
+                        )
+                    layer_span.update(postfix="window nets merged")
+
+                    with layer_span.child("Compute hierarchy window quality"):
+                        complexity = _complexity(collapsed_hierarchy_net)
+                        precision = self.precision_calculator.precision(
+                            window_log,
+                            hierarchy_net,
+                            prepared_context=prepared_context,
+                        )
+                    layer_span.update(postfix=f"precision={precision:.3f}")
+
+                    weighted_baseline_complexity += window_weight * baseline_complexity
+                    weighted_complexity += window_weight * complexity
+                    weighted_baseline_precision += window_weight * baseline_precision
+                    weighted_precision += window_weight * precision
+                    total_weight += window_weight
+                    span.update(postfix=f"layer {layer} complete")
+
+            if total_weight <= 0:
+                return QualityScores(0.0, 1.0, 0.0, 0.0, 0.0)
+
+            simplicity_gain = (
+                1 - weighted_complexity / weighted_baseline_complexity
+                if weighted_baseline_complexity > 0
+                else 0.0
+            )
+            precision = weighted_precision / total_weight
+            information_loss = (
+                1 - weighted_precision / weighted_baseline_precision
+                if weighted_baseline_precision > 0
+                else 1.0
+            )
+            complexity = weighted_complexity / total_weight
+            quality = _f1_quality(simplicity_gain, information_loss)
+            span.update(postfix=f"quality={quality:.3f}")
+
             return QualityScores(
                 simplicity_gain=simplicity_gain,
                 information_loss=information_loss,
@@ -1336,8 +1542,21 @@ def _merge_hierarchy_nets(
     collapse: bool,
     collapsed_net_builder: CollapsedNetBuilder,
 ) -> AcceptingOCPN | None:
+    return _merge_area_nets(
+        hierarchy.areas,
+        collapse=collapse,
+        collapsed_net_builder=collapsed_net_builder,
+    )
+
+
+def _merge_area_nets(
+    areas,
+    *,
+    collapse: bool,
+    collapsed_net_builder: CollapsedNetBuilder,
+) -> AcceptingOCPN | None:
     raws = []
-    for area in hierarchy.areas:
+    for area in areas:
         net = area.net
         if collapse:
             net = collapsed_net_builder.collapse(area.net, area.subprocesses)
@@ -1345,6 +1564,20 @@ def _merge_hierarchy_nets(
             raws.append(net.raw)
 
     return AcceptingOCPN.from_raw(_merge_ocpn_models(*raws))
+
+
+def _normalize_quality_layer_context(layer_count: int, layer_context) -> tuple[int, ...]:
+    if len(layer_context) != layer_count:
+        raise ValueError(
+            "layer_context must contain exactly one value per hierarchy area "
+            f"({layer_count} expected, {len(layer_context)} given)."
+        )
+    normalized = []
+    for value in layer_context:
+        if value is None or int(value) < 0:
+            raise ValueError("layer_context values must be non-negative integers.")
+        normalized.append(int(value))
+    return tuple(normalized)
 
 
 def _complexity(net: AcceptingOCPN | None) -> float:
