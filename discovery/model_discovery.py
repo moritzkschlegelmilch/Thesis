@@ -3,6 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from itertools import combinations
 from math import comb
+import os
 from typing import Any
 
 from pm4py.objects.petri_net.obj import PetriNet
@@ -163,13 +164,25 @@ class PrecisionCalculator:
         net = self._as_net(net_or_hierarchy)
         if net is None:
             return 0.0
+        if self.parameters.sample_size == 0:
+            return 0.0
+
+        if os.environ.get("NET_QUALITY_DEBUG"):
+            print(
+                "[precision-debug] precision calculator call: "
+                f"net_object_types={len(net.object_types)}, "
+                f"net_activities={len(net.activities)}, "
+                f"sample_size={self.parameters.sample_size}, "
+                f"replay_budget={self.parameters.replay_budget}",
+                flush=True,
+            )
 
         with self.checkpoint.section(
             "Precision calculation",
             metadata={
                 **_log_metadata(log),
                 "sample_size": self.parameters.sample_size,
-                "depth": self.parameters.d,
+                "oracle": "full-prefix",
             },
         ):
             return float(NetQuality(
@@ -177,20 +190,30 @@ class PrecisionCalculator:
                 log,
                 max_nodes_per_replay=self.parameters.replay_budget or 1000,
                 precision_context_sample_size=self.parameters.sample_size,
-                precision_context_depth=self.parameters.d,
+                precision_context_depth=None,
                 random_seed=self.parameters.random_seed,
             ).precision())
 
     def prepare_delta(self, log, full_net: AcceptingOCPN | None) -> Any:
         if full_net is None:
             return None
+        if self.parameters.sample_size == 0:
+            return {
+                "precision": 0.0,
+                "context_weights": {},
+                "prepared_original": {},
+                "original_enabled_by_context": {},
+                "baseline_enabled_mass": 0.0,
+                "sampled_contexts": (),
+                "candidate_precision_cache": {},
+            }
         with self.checkpoint.section(
             "Prepare precision delta context",
             total=6,
             metadata={
                 **_log_metadata(log),
                 "sample_size": self.parameters.sample_size,
-                "depth": self.parameters.d,
+                "oracle": "full-prefix",
             },
         ) as span:
             quality = NetQuality(
@@ -198,14 +221,20 @@ class PrecisionCalculator:
                 log,
                 max_nodes_per_replay=self.parameters.replay_budget or 1000,
                 precision_context_sample_size=self.parameters.sample_size,
-                precision_context_depth=self.parameters.d,
+                precision_context_depth=None,
                 random_seed=self.parameters.random_seed,
             )
             with span.child("Prepare precision context keys"):
-                prepared_original = quality._prepare_log(
-                    log,
-                    materialize_replay=False,
-                )
+                if self.parameters.sample_size is None:
+                    prepared_original = quality._prepare_log(
+                        log,
+                        materialize_replay=False,
+                    )
+                else:
+                    prepared_original = quality._prepare_sampled_precision_log(
+                        log,
+                        self.parameters.sample_size,
+                    )
                 exact_context_weights = _context_weights(prepared_original)
             span.update(postfix=f"contexts={len(exact_context_weights)}")
 
@@ -213,10 +242,14 @@ class PrecisionCalculator:
                 "Sample precision contexts",
                 metadata={"sample_size": self.parameters.sample_size},
             ) as sample_span:
-                sampled_context_weights = _sample_context_draw_counts(
-                    exact_context_weights,
-                    self.parameters.sample_size,
-                    random_seed=self.parameters.random_seed,
+                sampled_context_weights = (
+                    _sample_context_draw_counts(
+                        exact_context_weights,
+                        self.parameters.sample_size,
+                        random_seed=self.parameters.random_seed,
+                    )
+                    if self.parameters.sample_size is None
+                    else exact_context_weights
                 )
                 context_weights = sampled_context_weights or exact_context_weights
                 sampled_contexts = tuple(
@@ -1206,7 +1239,7 @@ def _estimate_precision_for_activity_subset(
             if str(label) in candidate_activities
         )
         overlap = log_enabled & model_enabled
-        if not model_enabled or not overlap:
+        if not model_enabled:
             continue
 
         precision_sum += weight * (len(overlap) / len(model_enabled))

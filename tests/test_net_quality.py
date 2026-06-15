@@ -259,6 +259,46 @@ class NetQualityTests(unittest.TestCase):
 
         self.assertEqual(enabled, {"start", "first"})
 
+    def test_replay_budget_follows_short_visible_path_before_silent_alternatives(self):
+        quality = NetQuality(_build_flower_ocpn(["a"]), max_nodes_per_replay=1)
+        replay_event = _ReplayEvent(
+            context_key=(),
+            binding_sequence=(
+                _BindingStep(
+                    label="a",
+                    objects_by_type=(("order", (("order", "o1"),)),),
+                ),
+            ),
+            context_tokens_by_type=(("order", (("order", "o1"),)),),
+        )
+        silent_successors = {
+            "start": ["silent_a", "silent_b"],
+            "after_a": [],
+            "silent_a": [],
+            "silent_b": [],
+        }
+
+        with mock.patch.object(
+            quality,
+            "_initial_state",
+            return_value="start",
+        ), mock.patch.object(
+            quality,
+            "_state_key",
+            side_effect=lambda state: state,
+        ), mock.patch.object(
+            quality,
+            "_fire_silent",
+            side_effect=lambda state: silent_successors[state],
+        ), mock.patch.object(
+            quality,
+            "_fire_visible",
+            side_effect=lambda state, step: ["after_a"] if state == "start" else [],
+        ):
+            terminal_states = quality._replay_terminal_states(replay_event)
+
+        self.assertEqual(terminal_states, ("after_a",))
+
     def test_discovered_deterministic_pm4py_ocpn_has_perfect_quality(self):
         ocel = _build_single_type_ocel([
             ["create", "approve", "complete"],
@@ -312,6 +352,10 @@ class NetQualityTests(unittest.TestCase):
                 "ctx_a": frozenset({"create"}),
                 "ctx_b": frozenset({"approve"}),
             },
+            "context_weights": {
+                "ctx_a": 3,
+                "ctx_b": 1,
+            },
             "replay": {
                 "ctx_a": [object(), object()],
                 "ctx_b": [object()],
@@ -321,11 +365,11 @@ class NetQualityTests(unittest.TestCase):
         with mock.patch.object(
             quality,
             "_prepare_log",
-            return_value=prepared,
+            side_effect=AssertionError("full precision log should not be prepared"),
         ), mock.patch.object(
             quality,
-            "_sample_precision_context_draw_counts",
-            return_value={"ctx_a": 3, "ctx_b": 1},
+            "_prepare_sampled_precision_log",
+            return_value=prepared,
         ), mock.patch.object(
             quality,
             "_build_model_enabled_by_context",
@@ -344,7 +388,7 @@ class NetQualityTests(unittest.TestCase):
             progress_desc="Replaying sampled contexts",
         )
 
-    def test_precision_context_sampling_preserves_skip_behavior(self):
+    def test_precision_context_sampling_counts_zero_overlap_as_zero(self):
         quality = NetQuality(
             _build_flower_ocpn(["create", "approve"]),
             precision_context_sample_size=4,
@@ -360,6 +404,10 @@ class NetQualityTests(unittest.TestCase):
                 "ctx_a": frozenset({"create"}),
                 "ctx_b": frozenset({"approve"}),
             },
+            "context_weights": {
+                "ctx_a": 1,
+                "ctx_b": 3,
+            },
             "replay": {
                 "ctx_a": [object()],
                 "ctx_b": [object()],
@@ -369,11 +417,11 @@ class NetQualityTests(unittest.TestCase):
         with mock.patch.object(
             quality,
             "_prepare_log",
-            return_value=prepared,
+            side_effect=AssertionError("full precision log should not be prepared"),
         ), mock.patch.object(
             quality,
-            "_sample_precision_context_draw_counts",
-            return_value={"ctx_a": 1, "ctx_b": 3},
+            "_prepare_sampled_precision_log",
+            return_value=prepared,
         ), mock.patch.object(
             quality,
             "_build_model_enabled_by_context",
@@ -384,31 +432,92 @@ class NetQualityTests(unittest.TestCase):
         ):
             precision = quality.precision()
 
-        self.assertAlmostEqual(precision, 0.5, places=6)
+        self.assertAlmostEqual(precision, (1 * 0.5 + 3 * 0.0) / 4, places=6)
 
-    def test_prepare_log_can_limit_context_predecessor_depth(self):
+    def test_precision_context_sampling_excludes_non_replayable_contexts(self):
+        quality = NetQuality(
+            _build_flower_ocpn(["create", "approve"]),
+            precision_context_sample_size=2,
+            random_seed=7,
+        )
+        prepared = {
+            "events": ("e1", "e2"),
+            "ctx": {
+                "e1": "ctx_a",
+                "e2": "ctx_b",
+            },
+            "log": {
+                "ctx_a": frozenset({"create"}),
+                "ctx_b": frozenset({"approve"}),
+            },
+            "context_weights": {
+                "ctx_a": 1,
+                "ctx_b": 1,
+            },
+            "replay": {
+                "ctx_a": [object()],
+                "ctx_b": [object()],
+            },
+            "replay_limited_contexts": {"ctx_b"},
+        }
+
+        with mock.patch.object(
+            quality,
+            "_prepare_log",
+            side_effect=AssertionError("full precision log should not be prepared"),
+        ), mock.patch.object(
+            quality,
+            "_prepare_sampled_precision_log",
+            return_value=prepared,
+        ), mock.patch.object(
+            quality,
+            "_build_model_enabled_by_context",
+            return_value={
+                "ctx_a": frozenset({"create"}),
+                "ctx_b": frozenset(),
+            },
+        ):
+            precision = quality.precision()
+
+        self.assertAlmostEqual(precision, 1.0, places=6)
+
+    def test_zero_precision_context_sample_size_skips_precision_preparation(self):
+        quality = NetQuality(
+            _build_flower_ocpn(["create"]),
+            precision_context_sample_size=0,
+        )
+
+        with mock.patch.object(
+            quality,
+            "_prepare_log",
+            side_effect=AssertionError("precision log should not be prepared"),
+        ):
+            precision = quality.precision(object())
+
+        self.assertEqual(precision, 0.0)
+
+    def test_prepare_log_uses_full_prefix_context_when_depth_is_set(self):
         ocel = _build_single_type_ocel([
             ["create", "approve", "complete", "ship"],
         ])
         ocpn = _build_flower_ocpn(["create", "approve", "complete", "ship"])
-        depth_one_quality = NetQuality(ocpn, ocel, precision_context_depth=1)
-        depth_two_quality = NetQuality(ocpn, ocel, precision_context_depth=2)
+        depth_quality = NetQuality(ocpn, ocel, precision_context_depth=1)
         full_quality = NetQuality(ocpn, ocel)
 
-        depth_one_prepared = depth_one_quality._prepare_log(ocel)
-        depth_two_prepared = depth_two_quality._prepare_log(ocel)
+        depth_prepared = depth_quality._prepare_log(ocel)
         full_prepared = full_quality._prepare_log(ocel)
 
-        depth_one_ctx = depth_one_prepared["ctx"]["e4"]
-        depth_two_ctx = depth_two_prepared["ctx"]["e4"]
+        depth_ctx = depth_prepared["ctx"]["e4"]
         full_ctx = full_prepared["ctx"]["e4"]
 
-        depth_one_binding = depth_one_prepared["replay"][depth_one_ctx][0].binding_sequence
-        depth_two_binding = depth_two_prepared["replay"][depth_two_ctx][0].binding_sequence
+        depth_binding = depth_prepared["replay"][depth_ctx][0].binding_sequence
         full_binding = full_prepared["replay"][full_ctx][0].binding_sequence
 
-        self.assertEqual([step.label for step in depth_one_binding], ["complete"])
-        self.assertEqual([step.label for step in depth_two_binding], ["approve", "complete"])
+        self.assertEqual(depth_ctx, full_ctx)
+        self.assertEqual(
+            [step.label for step in depth_binding],
+            ["create", "approve", "complete"],
+        )
         self.assertEqual(
             [step.label for step in full_binding],
             ["create", "approve", "complete"],
@@ -437,6 +546,40 @@ class NetQualityTests(unittest.TestCase):
             [step.label for step in replay[selected_context][0].binding_sequence],
             ["create", "approve"],
         )
+
+    def test_materialize_replay_keeps_full_prefix_beyond_replay_budget(self):
+        ocel = _build_single_type_ocel([
+            ["create", "approve", "complete"],
+        ])
+        quality = NetQuality(
+            _build_flower_ocpn(["create", "approve", "complete"]),
+            ocel,
+            max_nodes_per_replay=2,
+        )
+        prepared = quality._prepare_log(ocel, materialize_replay=False)
+        selected_context = prepared["ctx"]["e3"]
+
+        with mock.patch.object(
+            quality,
+            "_group_event_tokens_by_type",
+            wraps=quality._group_event_tokens_by_type,
+        ) as group_patch:
+            replay = quality._materialize_replay_events(
+                prepared,
+                selected_contexts=(selected_context,),
+            )
+
+        replay_event = replay[selected_context][0]
+        self.assertFalse(replay_event.replay_limit_exceeded)
+        self.assertEqual(
+            [step.label for step in replay_event.binding_sequence],
+            ["create", "approve"],
+        )
+        self.assertEqual(
+            quality._replay(replay_event),
+            frozenset({"create", "approve", "complete"}),
+        )
+        self.assertGreater(group_patch.call_count, 0)
 
     def test_replay_cache_alpha_normalizes_object_ids(self):
         quality = NetQuality(_build_flower_ocpn(["a"]))
@@ -506,7 +649,7 @@ class NetQualityTests(unittest.TestCase):
         output = buffer.getvalue()
 
         self.assertAlmostEqual(fitness, 1.0, places=6)
-        self.assertIn("Preparing OCPA-style event contexts", output)
+        self.assertIn("Preparing full-prefix precision contexts", output)
         self.assertIn("Replaying contexts", output)
         self.assertIn("Aggregating scores", output)
         self.assertIn("Done.", output)

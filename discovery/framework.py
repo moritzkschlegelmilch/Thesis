@@ -160,6 +160,8 @@ class AdvancedProcessAreaHierarchy:
 
 @dataclass(frozen=True)
 class PrecisionParameters:
+    # Kept for compatibility with older configs. Precision uses full-prefix
+    # oracle contexts; sampling and replay_budget are the approximation knobs.
     d: int | None = None
     l: int | None = None
     replay_budget: int | None = None

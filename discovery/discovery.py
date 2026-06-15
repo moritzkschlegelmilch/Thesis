@@ -127,7 +127,7 @@ class ProcessAreaDiscoveryFramework(ABC):
         show_progress=False,
         *,
         precision_context_sample_size=512,
-        precision_context_depth=5,
+        precision_context_depth=None,
         precision_context_sample_seed=None,
     ):
         self.activity_to_layer, self.discovered_models = discover_models_for_hierarchy(
@@ -151,7 +151,7 @@ class ProcessAreaDiscoveryFramework(ABC):
         show_progress=False,
         *,
         precision_context_sample_size=512,
-        precision_context_depth=5,
+        precision_context_depth=None,
         precision_context_sample_seed=None,
     ):
         self.get_layers(show_progress=show_progress)

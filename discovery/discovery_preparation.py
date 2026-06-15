@@ -1029,6 +1029,9 @@ def _build_model_enabled_by_context(
 
 
 def _context_weights(prepared):
+    if "context_weights" in prepared:
+        return dict(prepared["context_weights"])
+
     weights = defaultdict(int)
 
     for event_id in prepared["events"]:
@@ -1043,8 +1046,10 @@ def _context_weights(prepared):
 def _sample_context_draw_counts(context_weights, sample_size, random_seed=None):
     if sample_size is None:
         return None
-    if sample_size <= 0:
+    if sample_size < 0:
         raise ValueError("precision_context_sample_size must be positive.")
+    if sample_size == 0:
+        return Counter()
     if not context_weights:
         return {}
 
@@ -1064,7 +1069,7 @@ def _precision_from_prepared(prepared, model_enabled_by_context, context_weights
         model_enabled = model_enabled_by_context.get(ctx, frozenset())
         overlap = log_enabled & model_enabled
 
-        if not model_enabled or not overlap:
+        if not model_enabled:
             continue
 
         precision_sum += weight * (len(overlap) / len(model_enabled))
@@ -1145,13 +1150,19 @@ def _build_terminal_states_by_context(
             file=sys.stdout,
         )
 
+    replay_limited_contexts = set(prepared.get("replay_limited_contexts", ()))
     for ctx, events in replay_items:
         terminal_states = {}
         for event in events:
+            if getattr(event, "replay_limit_exceeded", False):
+                replay_limited_contexts.add(ctx)
             for state in quality._replay_terminal_states(event):
                 terminal_states.setdefault(quality._state_key(state), state)
+            if hasattr(quality, "_replay_limit_was_hit") and quality._replay_limit_was_hit(event):
+                replay_limited_contexts.add(ctx)
         terminal_states_by_context[ctx] = tuple(terminal_states.values())
 
+    prepared["replay_limited_contexts"] = replay_limited_contexts
     return terminal_states_by_context
 
 
@@ -1282,7 +1293,7 @@ def _build_precision_reference_bundle(
     previous_layer_ocpn,
     *,
     precision_context_sample_size=None,
-    precision_context_depth=5,
+    precision_context_depth=None,
     precision_context_sample_seed=None,
     show_progress=False,
 ):
@@ -1290,6 +1301,21 @@ def _build_precision_reference_bundle(
 
     if source_ocel is None or current_layer_ocpn is None or previous_layer_ocpn is None:
         return None
+    if precision_context_sample_size == 0:
+        return {
+            "context_weights": {},
+            "prepared_original": {},
+            "original_terminal_states_by_context": {},
+            "original_enabled_by_context": {},
+            "baseline_enabled_mass": 0.0,
+            "reduced_log_enabled_by_context": {},
+            "removed_object_types": frozenset(str(object_type) for object_type in removed_object_types),
+            "projected_activities": frozenset(),
+            "precision": 0.0,
+            "candidate_enabled_cache": {},
+            "sampled_contexts": (),
+            "show_progress": show_progress,
+        }
 
     projected_activities = {
         activity
@@ -1328,21 +1354,26 @@ def _build_precision_reference_bundle(
         merged_ocpn,
         merged_ocel,
         precision_context_sample_size=precision_context_sample_size,
-        precision_context_depth=precision_context_depth,
+        precision_context_depth=None,
         random_seed=precision_context_sample_seed,
     )
-    prepared_original = _prepare_log_for_precision(
-        quality,
-        merged_ocel,
-        show_progress=show_progress,
-        materialize_replay=precision_context_sample_size is None,
-    )
-    exact_context_weights = _context_weights(prepared_original)
-    sampled_context_weights = _sample_context_draw_counts(
-        exact_context_weights,
-        precision_context_sample_size,
-        random_seed=precision_context_sample_seed,
-    )
+    if precision_context_sample_size is None:
+        prepared_original = _prepare_log_for_precision(
+            quality,
+            merged_ocel,
+            show_progress=show_progress,
+            materialize_replay=True,
+        )
+        exact_context_weights = _context_weights(prepared_original)
+        sampled_context_weights = None
+    else:
+        prepared_original = quality._prepare_sampled_precision_log(
+            merged_ocel,
+            precision_context_sample_size,
+            show_progress=show_progress,
+        )
+        exact_context_weights = _context_weights(prepared_original)
+        sampled_context_weights = exact_context_weights
     context_weights = sampled_context_weights or exact_context_weights
     sampled_contexts = tuple(
         ctx
@@ -1356,7 +1387,7 @@ def _build_precision_reference_bundle(
             f"contexts={len(sampled_contexts)}/{len(exact_context_weights)}, "
             f"draws={sampled_events}, "
             f"mode={'sampled' if sampled_context_weights is not None else 'exact'}, "
-            f"depth={'full' if precision_context_depth is None else precision_context_depth}",
+            "oracle=full-prefix",
             file=sys.stdout,
         )
     original_terminal_states_by_context = _build_terminal_states_by_context(
@@ -1396,12 +1427,22 @@ def _build_precision_reference_bundle(
             "replay": {},
         }
     else:
-        reduced_prepared = _prepare_log_for_precision(
-            quality,
-            reduced_log_ocel,
-            show_progress=show_progress,
-            materialize_replay=False,
-        )
+        if sampled_context_weights is None:
+            reduced_prepared = _prepare_log_for_precision(
+                quality,
+                reduced_log_ocel,
+                show_progress=show_progress,
+                materialize_replay=False,
+            )
+        else:
+            reduced_prepared = quality._prepare_precision_log_for_event_counts(
+                reduced_log_ocel,
+                {
+                    event_id: 1
+                    for event_id in prepared_original.get("events", ())
+                },
+                show_progress=show_progress,
+            )
 
     return {
         "quality": quality,
@@ -2130,7 +2171,7 @@ def discover_models_for_hierarchy(
     show_progress=False,
     *,
     precision_context_sample_size=512,
-    precision_context_depth=5,
+    precision_context_depth=None,
     precision_context_sample_seed=None,
 ):
     object_to_type, event_records = _extract_ocel_filtering_context(ocel)

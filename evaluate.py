@@ -47,7 +47,7 @@ from totem_lib import import_ocel
 SUPPORTED_LOG_EXTENSIONS = (".sqlite", ".xml", ".xmlocel", ".json", ".jsonocel")
 DEFAULT_LAYER_CONTEXT = 1
 DEFAULT_PRECISION_CONTEXT_SAMPLE_SIZE = 512
-DEFAULT_PRECISION_CONTEXT_DEPTH = 5
+DEFAULT_PRECISION_CONTEXT_DEPTH = None
 DEFAULT_PRECISION_CONTEXT_SAMPLE_SEED = None
 DEFAULT_MAX_NODES_PER_REPLAY = 128
 DEFAULT_QUALITY_TIMEOUT_SECONDS = 1000
@@ -743,6 +743,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--precision-context-depth",
         type=int,
         default=DEFAULT_PRECISION_CONTEXT_DEPTH,
+        help="Deprecated compatibility option; precision uses full-prefix oracle contexts.",
     )
     parser.add_argument(
         "--precision-context-sample-seed",

@@ -968,6 +968,7 @@ class SubprocessDetectionTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(precision_bundle)
+        self.assertIsNone(captured["kwargs"]["precision_context_depth"])
         self.assertEqual(set(captured["ocpn"]["activities"]), {"b", "c"})
         self.assertEqual(
             {
@@ -1011,34 +1012,37 @@ class SubprocessDetectionTests(unittest.TestCase):
                 self.kwargs = kwargs
 
             def _prepare_log(self, ocel, show_progress=False):
+                raise AssertionError("full precision log should not be prepared")
+
+            def _prepare_sampled_precision_log(self, ocel, sample_size, show_progress=False):
                 if ocel is merged_ocel:
                     return {
-                        "events": ("e1", "e2"),
+                        "events": ("e2",),
                         "ctx": {
-                            "e1": "ctx_a",
                             "e2": "ctx_b",
                         },
                         "log": {
-                            "ctx_a": frozenset({"a"}),
                             "ctx_b": frozenset({"b"}),
                         },
+                        "context_weights": {
+                            "ctx_b": 3,
+                        },
                         "replay": {
-                            "ctx_a": [replay_event_a],
                             "ctx_b": [replay_event_b],
                         },
                     }
+                raise AssertionError("unexpected sampled OCEL")
+
+            def _prepare_precision_log_for_event_counts(self, ocel, event_counts, show_progress=False):
                 return {
-                    "events": ("e1", "e2"),
+                    "events": ("e2",),
                     "ctx": {
-                        "e1": "reduced_a",
                         "e2": "reduced_b",
                     },
                     "log": {
-                        "reduced_a": frozenset({"a"}),
                         "reduced_b": frozenset({"b"}),
                     },
                     "replay": {
-                        "reduced_a": [object()],
                         "reduced_b": [object()],
                     },
                 }
@@ -1063,9 +1067,6 @@ class SubprocessDetectionTests(unittest.TestCase):
                 (reduced_ocel, [], ["a", "b"]),
             ],
         ), patch(
-            "repo.discovery.discovery_preparation._sample_context_draw_counts",
-            return_value={"ctx_b": 3},
-        ) as sample_patch, patch(
             "repo.discovery.net_quality.NetQuality",
             _FakeQuality,
         ):
@@ -1083,7 +1084,6 @@ class SubprocessDetectionTests(unittest.TestCase):
                 precision_context_sample_seed=11,
             )
 
-        sample_patch.assert_called_once()
         self.assertEqual(precision_bundle["context_weights"], {"ctx_b": 3})
         self.assertEqual(precision_bundle["sampled_contexts"], ("ctx_b",))
         self.assertEqual(
@@ -1132,6 +1132,19 @@ class SubprocessDetectionTests(unittest.TestCase):
                 pass
 
             def _prepare_log(self, ocel, show_progress=False):
+                raise AssertionError("full precision log should not be prepared")
+
+            def _prepare_sampled_precision_log(self, ocel, sample_size, show_progress=False):
+                prepare_progress_flags.append(show_progress)
+                return {
+                    "events": ("e1",),
+                    "ctx": {"e1": "ctx"},
+                    "log": {"ctx": frozenset({"b"})},
+                    "context_weights": {"ctx": 1},
+                    "replay": {"ctx": [object()]},
+                }
+
+            def _prepare_precision_log_for_event_counts(self, ocel, event_counts, show_progress=False):
                 prepare_progress_flags.append(show_progress)
                 return {
                     "events": ("e1",),
@@ -2468,7 +2481,7 @@ class SubprocessDetectionTests(unittest.TestCase):
         )
         self.assertEqual(select_patch.call_args.kwargs["precision_bundle"], precision_reference)
         self.assertIs(discovered_models[2]["precision_reference"], precision_reference)
-        self.assertEqual(precision_patch.call_args.kwargs["precision_context_depth"], 5)
+        self.assertIsNone(precision_patch.call_args.kwargs["precision_context_depth"])
 
     def test_layer_discovery_keeps_boundary_activities_attached_to_subprocess_candidates(self):
         ocel = _FakeInputOCEL(
