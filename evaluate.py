@@ -287,7 +287,7 @@ def evaluate_log(
                     verbose=verbose,
                 )
                 quality_log = _quality_log(ocel)
-                quality = evaluator.evaluate(quality_log, hierarchy, delta)
+                quality = evaluator.evaluate(quality_log, hierarchy)
                 quality_data = _quality_to_dict(quality)
                 span.update(postfix=f"quality={quality.quality:.3f}")
 
