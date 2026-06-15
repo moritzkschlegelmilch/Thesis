@@ -12,6 +12,8 @@ import signal
 import tempfile
 from typing import Any, Callable, Iterable
 
+from tqdm import tqdm
+
 from discovery import (
     CheckSet,
     CheckpointManager,
@@ -48,6 +50,7 @@ DEFAULT_PRECISION_CONTEXT_SAMPLE_SIZE = 512
 DEFAULT_PRECISION_CONTEXT_DEPTH = 5
 DEFAULT_PRECISION_CONTEXT_SAMPLE_SEED = None
 DEFAULT_MAX_NODES_PER_REPLAY = 128
+DEFAULT_QUALITY_TIMEOUT_SECONDS = 10 * 60
 
 
 LayerContext = int | Iterable[int] | Callable[[LayerAssignment, Any, Path], Iterable[int]]
@@ -139,6 +142,7 @@ def evaluate_event_log_folder(
     log_importer: Callable[[str], Any] = import_ocel,
     continue_on_error: bool = True,
     per_log_timeout_seconds: int | float | None = None,
+    quality_timeout_seconds: int | float | None = DEFAULT_QUALITY_TIMEOUT_SECONDS,
     skip_quality: bool = False,
 ) -> dict[str, Any]:
     """Evaluate all event logs in a folder with configured layer and hierarchy miners.
@@ -181,23 +185,34 @@ def evaluate_event_log_folder(
         metadata={"logs": len(input_paths)},
         unit="log",
     ) as folder_span:
-        for input_path in input_paths:
+        for log_index, input_path in enumerate(input_paths, start=1):
             log_output_dir = _log_output_dir(input_dir, output_dir, input_path)
             checkpoint = checkpoint_factory()
+            if verbose:
+                tqdm.write(
+                    f"Evaluating log {log_index}/{len(input_paths)}: {input_path.name}",
+                    file=folder_checkpoint.file,
+                )
+            folder_span.update(
+                0,
+                metadata={"current_log": input_path.name},
+                postfix=f"running {input_path.name}",
+            )
             try:
-                with _log_timeout(per_log_timeout_seconds, input_path):
-                    summary = evaluate_log(
-                        input_path,
-                        log_output_dir,
-                        layer_miner,
-                        hierarchy_miner,
-                        layer_context=layer_context,
-                        quality_evaluator=quality_evaluator,
-                        verbose=verbose,
-                        checkpoint=checkpoint,
-                        log_importer=log_importer,
-                        skip_quality=skip_quality,
-                    )
+                summary = evaluate_log(
+                    input_path,
+                    log_output_dir,
+                    layer_miner,
+                    hierarchy_miner,
+                    layer_context=layer_context,
+                    quality_evaluator=quality_evaluator,
+                    verbose=verbose,
+                    checkpoint=checkpoint,
+                    log_importer=log_importer,
+                    skip_quality=skip_quality,
+                    per_log_timeout_seconds=per_log_timeout_seconds,
+                    quality_timeout_seconds=quality_timeout_seconds,
+                )
             except Exception as exc:
                 if not continue_on_error:
                     raise
@@ -206,7 +221,8 @@ def evaluate_event_log_folder(
                     log_output_dir,
                     exc,
                     checkpoint,
-                    timeout_seconds=per_log_timeout_seconds,
+                    timeout_seconds=getattr(exc, "timeout_seconds", per_log_timeout_seconds),
+                    timeout_operation=getattr(exc, "operation", None),
                 )
                 _write_json(log_output_dir / "summary.json", summary)
                 _write_json(log_output_dir / "checkpoints.json", summary["checkpoints"])
@@ -242,6 +258,8 @@ def evaluate_log(
     checkpoint: CheckpointManager | None = None,
     log_importer: Callable[[str], Any] = import_ocel,
     skip_quality: bool = False,
+    per_log_timeout_seconds: int | float | None = None,
+    quality_timeout_seconds: int | float | None = DEFAULT_QUALITY_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     """Evaluate a single event log and write all thesis evaluation artifacts."""
     _configure_runtime()
@@ -263,33 +281,43 @@ def evaluate_log(
             total=6,
             metadata={"log": input_path.name},
         ) as span:
-            with span.child("Import event log", metadata={"path": str(input_path)}):
-                ocel = log_importer(str(input_path))
-            log_stats = _summarize_ocel(ocel)
-            span.update(postfix=f"events={log_stats.get('events')}")
+            with _log_timeout(
+                per_log_timeout_seconds,
+                input_path,
+                operation="Event log pre-quality work",
+            ):
+                with span.child("Import event log", metadata={"path": str(input_path)}):
+                    ocel = log_importer(str(input_path))
+                log_stats = _summarize_ocel(ocel)
+                span.update(postfix=f"events={log_stats.get('events')}")
 
-            layer_assignment = layer_miner.mine(ocel)
-            layer_stats = _summarize_layer_assignment(layer_assignment)
-            span.update(postfix=f"layers={layer_stats.get('layers')}")
+                layer_assignment = layer_miner.mine(ocel)
+                layer_stats = _summarize_layer_assignment(layer_assignment)
+                span.update(postfix=f"layers={layer_stats.get('layers')}")
 
-            delta = _resolve_layer_context(layer_context, layer_assignment, ocel, input_path)
-            hierarchy = hierarchy_miner.mine(ocel, layer_assignment, delta)
-            hierarchy_stats = _summarize_hierarchy(hierarchy)
-            span.update(postfix=f"areas={hierarchy_stats.get('areas')}")
+                delta = _resolve_layer_context(layer_context, layer_assignment, ocel, input_path)
+                hierarchy = hierarchy_miner.mine(ocel, layer_assignment, delta)
+                hierarchy_stats = _summarize_hierarchy(hierarchy)
+                span.update(postfix=f"areas={hierarchy_stats.get('areas')}")
 
             if skip_quality:
                 quality_data = {"skipped": True}
                 span.update(postfix="quality skipped")
             else:
-                evaluator = quality_evaluator or _derive_quality_evaluator(
-                    hierarchy_miner,
-                    checkpoint=checkpoint,
-                    verbose=verbose,
-                )
-                quality_log = _quality_log(ocel)
-                quality = evaluator.evaluate(quality_log, hierarchy)
-                quality_data = _quality_to_dict(quality)
-                span.update(postfix=f"quality={quality.quality:.3f}")
+                with _log_timeout(
+                    quality_timeout_seconds,
+                    input_path,
+                    operation="Quality calculation for event log",
+                ):
+                    evaluator = quality_evaluator or _derive_quality_evaluator(
+                        hierarchy_miner,
+                        checkpoint=checkpoint,
+                        verbose=verbose,
+                    )
+                    quality_log = _quality_log(ocel)
+                    quality = evaluator.evaluate(quality_log, hierarchy)
+                    quality_data = _quality_to_dict(quality)
+                    span.update(postfix=f"quality={quality.quality:.3f}")
 
             artifacts = _render_artifacts(input_path, output_dir, hierarchy)
             span.update(postfix="visualizations saved")
@@ -368,6 +396,7 @@ def _failure_summary(
     checkpoint: CheckpointManager,
     *,
     timeout_seconds: int | float | None = None,
+    timeout_operation: str | None = None,
 ) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
     summary = {
@@ -382,11 +411,18 @@ def _failure_summary(
     }
     if timeout_seconds is not None:
         summary["timeout_seconds"] = timeout_seconds
+    if timeout_operation is not None:
+        summary["timeout_operation"] = timeout_operation
     return summary
 
 
 @contextmanager
-def _log_timeout(seconds: int | float | None, input_path: Path):
+def _log_timeout(
+    seconds: int | float | None,
+    input_path: Path,
+    *,
+    operation: str = "Event log",
+):
     if seconds is None or seconds <= 0:
         yield
         return
@@ -404,7 +440,11 @@ def _log_timeout(seconds: int | float | None, input_path: Path):
         return
 
     def _raise_timeout(signum, frame):
-        raise TimeoutError(f"Event log {input_path.name!r} exceeded {seconds:g} seconds.")
+        raise EvaluationTimeoutError(
+            f"{operation} {input_path.name!r} exceeded {seconds:g} seconds.",
+            seconds,
+            operation,
+        )
 
     signal.signal(signal.SIGALRM, _raise_timeout)
     signal.setitimer(signal.ITIMER_REAL, seconds)
@@ -415,6 +455,13 @@ def _log_timeout(seconds: int | float | None, input_path: Path):
         signal.signal(signal.SIGALRM, previous_handler)
         if previous_timer[0] > 0:
             signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
+
+
+class EvaluationTimeoutError(TimeoutError):
+    def __init__(self, message: str, timeout_seconds: float, operation: str):
+        super().__init__(message)
+        self.timeout_seconds = timeout_seconds
+        self.operation = operation
 
 
 def _derive_quality_evaluator(
@@ -693,10 +740,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--subprocess-only",
         action="store_true",
-        help=(
-            "Use subprocess-only move-up optimization and skip final quality "
-            "calculation, avoiding information-loss precision computation."
-        ),
+        help="Use subprocess-only move-up optimization.",
     )
     parser.add_argument(
         "--skip-quality",
@@ -723,6 +767,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         help="Mark one log as failed after this many seconds and continue with the next log.",
     )
+    parser.add_argument(
+        "--quality-timeout-minutes",
+        type=float,
+        help="Mark quality calculation as failed after this many minutes. Defaults to 10.",
+    )
+    parser.add_argument(
+        "--quality-timeout-seconds",
+        type=float,
+        help="Mark quality calculation as failed after this many seconds. Defaults to 600.",
+    )
     return parser
 
 
@@ -734,7 +788,12 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         args.per_log_timeout_seconds,
         args.per_log_timeout_minutes,
     )
-    skip_quality = args.skip_quality or args.subprocess_only
+    quality_timeout_seconds = _resolve_timeout_seconds(
+        args.quality_timeout_seconds,
+        args.quality_timeout_minutes,
+        default=DEFAULT_QUALITY_TIMEOUT_SECONDS,
+    )
+    skip_quality = args.skip_quality
     return evaluate_event_log_folder(
         args.input_dir,
         args.output_dir,
@@ -754,18 +813,24 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         verbose=verbose,
         continue_on_error=not args.fail_fast,
         per_log_timeout_seconds=timeout_seconds,
+        quality_timeout_seconds=quality_timeout_seconds,
         skip_quality=skip_quality,
     )
 
 
-def _resolve_timeout_seconds(seconds: float | None, minutes: float | None) -> float | None:
+def _resolve_timeout_seconds(
+    seconds: float | None,
+    minutes: float | None,
+    *,
+    default: float | None = None,
+) -> float | None:
     if seconds is not None and minutes is not None:
-        raise ValueError("Use either --per-log-timeout-seconds or --per-log-timeout-minutes, not both.")
+        raise ValueError("Use either timeout seconds or timeout minutes, not both.")
     if seconds is not None:
         return seconds
     if minutes is not None:
         return minutes * 60
-    return None
+    return default
 
 
 if __name__ == "__main__":

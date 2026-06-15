@@ -24,7 +24,7 @@ from helpers.vorbose import (
 from totem_lib import import_ocel
 
 
-DEFAULT_INPUT_PATH = "simple_logs/socel2_hinge.xml"
+DEFAULT_INPUT_PATH = "simple_logs/02_p2p.xml"
 DEFAULT_LAYER_CONTEXT = 1
 PRECISION_CONTEXT_SAMPLE_SIZE = 512
 PRECISION_CONTEXT_DEPTH = 5

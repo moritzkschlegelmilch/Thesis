@@ -927,41 +927,61 @@ class ModelDiscovery:
                             "Build full layer log",
                             metadata={"activities": len(full_activities)},
                         ):
-                            full_layer_log, _, _ = _build_layer_ocel(
+                            full_layer_log, _, included_full_activities = _build_layer_ocel(
                                 log,
                                 event_records,
                                 object_to_type,
                                 selected_object_types,
                                 full_activities,
                             )
-                        layer_span.update(postfix="full layer log built")
-
-                        check_set = getattr(self.optimization_function, "check_set", None)
-                        if isinstance(check_set, CheckSet):
-                            check_set.subprocess_activities = candidate_activities
-                            if check_set.use_delta:
-                                check_set.prepare_delta_reference(
-                                    full_layer_log,
-                                    full_activities,
-                                    candidate_activities,
-                                    prepare_precision=getattr(
-                                        self.optimization_function,
-                                        "requires_precision_delta_reference",
-                                        True,
-                                    ),
-                                )
-                        layer_span.update(postfix="delta reference ready")
-
-                        selected_activities = self.optimization_function.optimize(
-                            full_layer_log,
-                            hierarchy,
-                            candidate_activities,
-                            required_activities=native_activities,
-                        )
+                        included_full_activities = frozenset(included_full_activities)
+                        full_activities = full_activities & included_full_activities
+                        native_activities = native_activities & included_full_activities
+                        candidate_activities = full_activities - native_activities
                         layer_span.update(
-                            metadata={"selected_activities": len(selected_activities)},
-                            postfix=f"selected={len(selected_activities)}",
+                            metadata={
+                                "native_activities": len(native_activities),
+                                "candidate_activities": len(candidate_activities),
+                                "full_activities": len(full_activities),
+                                "projected_activities": len(included_full_activities),
+                            },
+                            postfix="full layer log built",
                         )
+
+                        if candidate_activities:
+                            check_set = getattr(self.optimization_function, "check_set", None)
+                            if isinstance(check_set, CheckSet):
+                                check_set.subprocess_activities = candidate_activities
+                                if check_set.use_delta:
+                                    check_set.prepare_delta_reference(
+                                        full_layer_log,
+                                        full_activities,
+                                        candidate_activities,
+                                        prepare_precision=getattr(
+                                            self.optimization_function,
+                                            "requires_precision_delta_reference",
+                                            True,
+                                        ),
+                                    )
+                            layer_span.update(postfix="delta reference ready")
+
+                            selected_activities = self.optimization_function.optimize(
+                                full_layer_log,
+                                hierarchy,
+                                candidate_activities,
+                                required_activities=native_activities,
+                            )
+                            layer_span.update(
+                                metadata={"selected_activities": len(selected_activities)},
+                                postfix=f"selected={len(selected_activities)}",
+                            )
+                        else:
+                            selected_activities = native_activities
+                            layer_span.update(
+                                2,
+                                metadata={"selected_activities": len(selected_activities)},
+                                postfix=f"no projected candidates; selected={len(selected_activities)}",
+                            )
                     else:
                         selected_activities = native_activities
                         layer_span.update(
