@@ -13,12 +13,14 @@ class CardinalityRelationScorer(Scorable, ResourceIndicator):
         Scorable.__init__(self, eps)
         ResourceIndicator.__init__(self, weight=eps)
         self.normalized_entropy = {}
+        self.cardinality_counts = {}
         self.type_to_object = {}
 
     def prepare(self, ocel):
         o2o, type_to_object = _build_event_derived_o2o(ocel)
         self.type_to_object = type_to_object
         normalized_entropy = {}
+        cardinality_counts_by_pair = {}
 
         for source_type in ocel.object_types:
             source_objects = type_to_object.get(source_type, set())
@@ -33,8 +35,10 @@ class CardinalityRelationScorer(Scorable, ResourceIndicator):
                     cardinality_counts,
                     source_count,
                 )
+                cardinality_counts_by_pair[(source_type, target_type)] = dict(cardinality_counts)
 
         self.normalized_entropy = normalized_entropy
+        self.cardinality_counts = cardinality_counts_by_pair
 
     def assign_score_pull(self, o_1, o_2) -> float:
         entropy_forward = self.normalized_entropy.get((o_1, o_2), 0.0)
@@ -51,8 +55,8 @@ class CardinalityRelationScorer(Scorable, ResourceIndicator):
 
     def assign_score_push(self, o_1, o_2) -> float:
         return (
-            self.normalized_entropy.get((o_2, o_1), 0.0)
-            - self.normalized_entropy.get((o_1, o_2), 0.0)
+            self.normalized_entropy.get((o_1, o_2), 0.0)
+            - self.normalized_entropy.get((o_2, o_1), 0.0)
         )
 
     def score(self, source_type: str, target_type: str) -> ResourceForces:
@@ -60,6 +64,35 @@ class CardinalityRelationScorer(Scorable, ResourceIndicator):
             push=self.assign_score_push(source_type, target_type),
             pull=self.assign_score_pull(source_type, target_type),
         )
+
+    def print_debug_details(self, object_types) -> None:
+        print("\nCardinality details:")
+        print(
+            "source -> target | source_objects | target_objects | "
+            "histogram | entropy | reverse_entropy | push | pull"
+        )
+        for source_type in object_types:
+            for target_type in object_types:
+                if source_type == target_type:
+                    continue
+                source_count = len(self.type_to_object.get(source_type, ()))
+                target_count = len(self.type_to_object.get(target_type, ()))
+                histogram = self.cardinality_counts.get((source_type, target_type), {})
+                entropy = self.normalized_entropy.get((source_type, target_type), 0.0)
+                reverse_entropy = self.normalized_entropy.get((target_type, source_type), 0.0)
+                push = self.assign_score_push(source_type, target_type)
+                pull = self.assign_score_pull(source_type, target_type)
+                histogram_text = "{" + ", ".join(
+                    f"{cardinality}: {count}"
+                    for cardinality, count in sorted(histogram.items())
+                ) + "}"
+                print(
+                    f"{source_type} -> {target_type} | "
+                    f"{source_count} | {target_count} | "
+                    f"{histogram_text} | "
+                    f"{entropy:.4f} | {reverse_entropy:.4f} | "
+                    f"{push:.4f} | {pull:.4f}"
+                )
 
 
 def _normalized_entropy(cardinality_counts, object_count):

@@ -48,6 +48,7 @@ class LayerAssignmentMiner:
         beta: float = 1.0,
         checkpoint: CheckpointManager | None = None,
         verbose: bool = False,
+        debug_matrices: bool = False,
     ):
         self.resource_indicators = tuple(
             indicator
@@ -58,6 +59,7 @@ class LayerAssignmentMiner:
         self.alpha = alpha
         self.beta = beta
         self.checkpoint = checkpoint or CheckpointManager(verbose=verbose)
+        self.debug_matrices = debug_matrices
         self.layer_assignment: LayerAssignment | None = None
         self.scores_push: dict[tuple[str, str], float] = {}
         self.scores_pull: dict[tuple[str, str], float] = {}
@@ -113,7 +115,43 @@ class LayerAssignmentMiner:
 
         self.scores_push = scores_push
         self.scores_pull = scores_pull
+        if self.debug_matrices:
+            self.print_debug_matrices(object_types, scores_push, scores_pull)
         return scores_push, scores_pull
+
+    def print_debug_matrices(
+        self,
+        object_types: Sequence[str],
+        scores_push: dict[tuple[str, str], float],
+        scores_pull: dict[tuple[str, str], float],
+    ) -> None:
+        try:
+            from ..helpers.vorbose import print_tuple_dict_matrices
+        except ImportError:
+            from helpers.vorbose import print_tuple_dict_matrices
+
+        object_types = tuple(object_types)
+        print("\n=== Layer scorer debug matrices ===")
+        for indicator in self.resource_indicators:
+            indicator_push = {}
+            indicator_pull = {}
+            for source_type in object_types:
+                for target_type in object_types:
+                    if source_type == target_type:
+                        indicator_push[(source_type, target_type)] = 0.0
+                        indicator_pull[(source_type, target_type)] = 0.0
+                        continue
+                    forces = indicator.score(source_type, target_type)
+                    indicator_push[(source_type, target_type)] = float(forces.push)
+                    indicator_pull[(source_type, target_type)] = float(forces.pull)
+
+            print(f"\n--- {type(indicator).__name__} (weight={indicator.weight}) ---")
+            print_tuple_dict_matrices(indicator_push, indicator_pull)
+            if hasattr(indicator, "print_debug_details"):
+                indicator.print_debug_details(object_types)
+
+        print("\n--- Combined weighted scores ---")
+        print_tuple_dict_matrices(scores_push, scores_pull)
 
     def mine(self, log) -> LayerAssignment:
         with self.checkpoint.section(

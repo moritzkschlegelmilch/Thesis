@@ -24,7 +24,7 @@ from helpers.vorbose import (
 from totem_lib import import_ocel
 
 
-DEFAULT_INPUT_PATH = "simple_logs/01_o2c.xml"
+DEFAULT_INPUT_PATH = "simple_logs/angular_github_commits_ocel.xml"
 DEFAULT_LAYER_CONTEXT = 1
 # PRECISION_CONTEXT_SAMPLE_SIZE = 256
 # PRECISION_CONTEXT_DEPTH = 5
@@ -86,6 +86,7 @@ def main():
         ],
         checkpoint=checkpoint,
         verbose=verbose,
+        debug_matrices=True,
     ).mine(ocel)
     hierarchy = build_model_discovery(
         checkpoint,
