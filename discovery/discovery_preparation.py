@@ -1691,53 +1691,102 @@ def _refresh_ocpn_activity_metadata(ocpn):
         }
 
 
-def _project_ocpn_to_activities(ocpn, allowed_activities):
+def _transition_identity_key(object_type, transition):
+    return (object_type, getattr(transition, "name", None))
+
+
+def _local_activity_restricted_clone(
+    ocpn,
+    allowed_activities,
+    extra_removed_transition_keys=frozenset(),
+):
     if ocpn is None:
         return None
 
+    restricted_ocpn, _ = _clone_ocpn(ocpn)
+    if restricted_ocpn is None:
+        return None
+
+    _copy_double_arc_metadata(ocpn, restricted_ocpn)
+    _apply_local_activity_restriction(
+        restricted_ocpn,
+        allowed_activities,
+        extra_removed_transition_keys,
+    )
+    return restricted_ocpn
+
+
+def _apply_local_activity_restriction(
+    ocpn,
+    allowed_activities,
+    extra_removed_transition_keys=frozenset(),
+):
     allowed_labels = {
         str(activity)
         for activity in allowed_activities
         if activity is not None
     }
-    projected_ocpn, _ = _clone_ocpn(ocpn)
-    if projected_ocpn is None:
-        return None
+    extra_removed_transition_keys = frozenset(extra_removed_transition_keys or ())
 
-    _copy_double_arc_metadata(ocpn, projected_ocpn)
+    for object_type, (net, initial_marking, final_marking) in ocpn["petri_nets"].items():
+        retained_transitions = set()
+        for transition in net.transitions:
+            remove_transition = (
+                transition.label is not None
+                and str(transition.label) not in allowed_labels
+            ) or (
+                _transition_identity_key(object_type, transition)
+                in extra_removed_transition_keys
+            )
+            if not remove_transition:
+                retained_transitions.add(transition)
 
-    for object_type, (net, _, _) in projected_ocpn["petri_nets"].items():
+        retained_places = set()
+        for place in net.places:
+            adjacent_transitions = {
+                arc.source
+                for arc in place.in_arcs
+                if isinstance(arc.source, PetriNet.Transition)
+            } | {
+                arc.target
+                for arc in place.out_arcs
+                if isinstance(arc.target, PetriNet.Transition)
+            }
+            if adjacent_transitions and adjacent_transitions <= retained_transitions:
+                retained_places.add(place)
+
         transitions_to_remove = [
             transition
             for transition in sorted(net.transitions, key=_sort_petri_net_node)
-            if transition.label is not None
-            and str(transition.label) not in allowed_labels
+            if transition not in retained_transitions
         ]
+        places_to_remove = [
+            place
+            for place in sorted(net.places, key=_sort_petri_net_node)
+            if place not in retained_places
+        ]
+
         for transition in transitions_to_remove:
             if transition in net.transitions:
                 petri_utils.remove_transition(net, transition)
+        for place in places_to_remove:
+            if place in net.places:
+                petri_utils.remove_place(net, place)
 
-    boundary_places = _boundary_places_by_type(projected_ocpn)
-    while True:
-        removed_orphan_places, _ = _remove_orphan_places_from_working_ocpn(
-            projected_ocpn,
-            boundary_places,
-        )
-        removed_silent_transitions, _ = _remove_useless_silent_transitions_from_working_ocpn(
-            projected_ocpn
-        )
-        if not removed_orphan_places and not removed_silent_transitions:
-            break
-
-    for object_type, (net, initial_marking, final_marking) in projected_ocpn["petri_nets"].items():
-        projected_ocpn["petri_nets"][object_type] = (
+        ocpn["petri_nets"][object_type] = (
             net,
             _filter_marking_to_net(initial_marking, net),
             _filter_marking_to_net(final_marking, net),
         )
 
-    _refresh_ocpn_activity_metadata(projected_ocpn)
-    return projected_ocpn
+    _refresh_ocpn_activity_metadata(ocpn)
+
+
+def _project_ocpn_to_activities(ocpn, allowed_activities):
+    if ocpn is None:
+        return None
+
+    return _local_activity_restricted_clone(ocpn, allowed_activities)
 
 
 def _build_simplicity_gain_working_ocpn(current_model, component):
@@ -1933,29 +1982,34 @@ def _compute_simplicity_gain(current_model, current_ocel, lower_layer_ocel, comp
     if working_ocpn is None:
         return 0
 
-    removed_score = _prune_candidate_activities_from_working_ocpn(
+    collapsed_subprocess_activities = {
+        activity
+        for group in _candidate_subprocess_activity_groups(component)
+        for activity in group
+    }
+    visible_labels_to_remove = {
+        str(activity)
+        for activity in component.get("activities", ())
+        if activity not in collapsed_subprocess_activities
+    }
+    retained_labels = {
+        str(activity)
+        for activity in working_ocpn.get("activities", ())
+        if activity is not None
+    } - visible_labels_to_remove
+    inserted_transition_keys = {
+        _transition_identity_key(object_type, transition)
+        for object_type, transition in inserted_transitions
+    }
+
+    restricted_ocpn = _local_activity_restricted_clone(
         working_ocpn,
-        component,
-        inserted_transitions,
+        retained_labels,
+        inserted_transition_keys,
     )
-
-    boundary_places = _boundary_places_by_type(working_ocpn)
-    while True:
-        removed_orphan_places, orphan_place_score = _remove_orphan_places_from_working_ocpn(
-            working_ocpn,
-            boundary_places,
-        )
-        removed_score += orphan_place_score
-
-        removed_silent_transitions, silent_transition_score = (
-            _remove_useless_silent_transitions_from_working_ocpn(working_ocpn)
-        )
-        removed_score += silent_transition_score
-
-        if not removed_orphan_places and not removed_silent_transitions:
-            break
-
-    return removed_score / baseline_score
+    restricted_score = _simplicity_estimator_score(restricted_ocpn)
+    simplicity_gain = (baseline_score - restricted_score) / baseline_score
+    return max(0.0, min(1.0, simplicity_gain))
 
 
 def _build_collapsed_subprocess_model(component_and_edge_ocpn, subprocess_activity_groups):

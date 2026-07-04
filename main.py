@@ -12,8 +12,7 @@ from discovery import (
     PM4PyOCPNDiscovery,
     PrecisionCalculator,
     PrecisionParameters,
-    SubprocessMoveUpOptimization,
-    SubprocessMiner,
+    SubprocessMiner, SubprocessMoveUpOptimization,
 )
 from discovery.scorables import (
     CardinalityRelationScorer,
@@ -32,8 +31,8 @@ from discovery.discovery_preparation import (
 )
 
 
-DEFAULT_INPUT_PATH = "all_logs/enron_all_mails.json"
-DEFAULT_LAYER_CONTEXT = 1
+DEFAULT_INPUT_PATH = "all_logs/ContainerLogistics.sqlite"
+DEFAULT_LAYER_CONTEXT = 4
 PRECISION_CONTEXT_SAMPLE_SIZE = 512
 PRECISION_CONTEXT_DEPTH = None
 PRECISION_CONTEXT_SAMPLE_SEED = None
@@ -45,29 +44,20 @@ DEFAULT_QUALITY_OUTPUT = "output/quality.json"
 
 
 def build_model_discovery(checkpoint, *, verbose=False):
-    # check_set = CheckSet(
-    #     PM4PyOCPNDiscovery(checkpoint=checkpoint, verbose=verbose),
-    #     SubprocessMiner(checkpoint=checkpoint, verbose=verbose),
-    #     CollapsedNetBuilder(checkpoint=checkpoint, verbose=verbose),
-    #     PrecisionCalculator(
-    #         PrecisionParameters(
-    #             d=PRECISION_CONTEXT_DEPTH,
-    #             replay_budget=MAX_NODES_PER_REPLAY,
-    #             sample_size=PRECISION_CONTEXT_SAMPLE_SIZE,
-    #             random_seed=PRECISION_CONTEXT_SAMPLE_SEED,
-    #         ),
-    #         checkpoint=checkpoint,
-    #         verbose=verbose,
-    #     ),
-    #     use_delta=True,
-    #     checkpoint=checkpoint,
-    #     verbose=verbose,
-    # )
-    subprocess_check_set = CheckSet(
+    check_set = CheckSet(
         PM4PyOCPNDiscovery(checkpoint=checkpoint, verbose=verbose),
         SubprocessMiner(checkpoint=checkpoint, verbose=verbose),
         CollapsedNetBuilder(checkpoint=checkpoint, verbose=verbose),
-        None,
+        PrecisionCalculator(
+            PrecisionParameters(
+                d=PRECISION_CONTEXT_DEPTH,
+                replay_budget=MAX_NODES_PER_REPLAY,
+                sample_size=PRECISION_CONTEXT_SAMPLE_SIZE,
+                random_seed=PRECISION_CONTEXT_SAMPLE_SEED,
+            ),
+            checkpoint=checkpoint,
+            verbose=verbose,
+        ),
         use_delta=True,
         checkpoint=checkpoint,
         verbose=verbose,
@@ -75,8 +65,7 @@ def build_model_discovery(checkpoint, *, verbose=False):
 
     return ModelDiscovery(
         PM4PyOCPNDiscovery(checkpoint=checkpoint, verbose=verbose),
-        SubprocessMoveUpOptimization(subprocess_check_set, checkpoint=checkpoint, verbose=verbose),
-        # GreedyOptimization(check_set, checkpoint=checkpoint, verbose=verbose),
+        GreedyOptimization(check_set, checkpoint=checkpoint, verbose=verbose),
         subprocess_miner=SubprocessMiner(checkpoint=checkpoint, verbose=verbose),
         alpha_decision_parameter=0.5,
         checkpoint=checkpoint,
@@ -139,6 +128,8 @@ def main():
         checkpoint=checkpoint,
         verbose=verbose,
         debug_matrices=True,
+        alpha=1.0,
+        beta=0.5
     ).mine(ocel)
     hierarchy = build_model_discovery(
         checkpoint,

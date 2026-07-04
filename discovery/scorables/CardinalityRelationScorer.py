@@ -51,7 +51,7 @@ class CardinalityRelationScorer(Scorable, ResourceIndicator):
         ) / (
             entropy_forward + entropy_reverse
         )
-        return harmonic_mean ** 2
+        return harmonic_mean
 
     def assign_score_push(self, o_1, o_2) -> float:
         return (

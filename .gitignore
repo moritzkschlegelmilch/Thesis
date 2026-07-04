@@ -13,6 +13,7 @@ tests/*
 !tests/test_discovery_preparation.py
 !tests/test_model_discovery_speedups.py
 !tests/test_ocel_importer.py
+!tests/test_resource_indicators.py
 heavy_compute/
 simple_logs/
 output/
@@ -22,3 +23,6 @@ simple_logs_evaluation_fast
 simple_logs_evaluation_subprocess_only
 all_logs
 simple_logs_eval_2
+
+final_evaluation_greedy
+final_evaluation_subprocess_only

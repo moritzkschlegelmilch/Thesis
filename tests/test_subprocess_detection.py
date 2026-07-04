@@ -26,6 +26,7 @@ from repo.discovery.discovery_preparation import (
     _build_pruning_candidates,
     _compute_information_loss,
     _compute_simplicity_gain,
+    _project_ocpn_to_activities,
     _select_best_pruning_candidate,
     _virtual_reduction_enabled_labels_by_context,
     clear_ocel_filtering_context_cache,
@@ -1193,7 +1194,37 @@ class SubprocessDetectionTests(unittest.TestCase):
         self.assertIn("Replaying precision reference contexts", output)
         self.assertEqual(prepare_progress_flags, [True, True])
 
-    def test_compute_simplicity_gain_prunes_activity_and_cleanup_chain(self):
+    def test_project_ocpn_to_activities_uses_local_activity_restriction_without_cleanup(self):
+        net = _build_net(
+            "item",
+            places=["source", "mid", "sink"],
+            transitions={
+                "a_t": "a",
+                "tau": None,
+            },
+            arcs=[
+                ("source", "a_t"),
+                ("a_t", "mid"),
+                ("mid", "tau"),
+                ("tau", "sink"),
+            ],
+        )
+        ocpn = _build_ocpn({"item": net})
+
+        projected_ocpn = _project_ocpn_to_activities(ocpn, set())
+        projected_net, _, _ = projected_ocpn["petri_nets"]["item"]
+
+        self.assertEqual({place.name for place in projected_net.places}, {"sink"})
+        self.assertEqual({transition.name for transition in projected_net.transitions}, {"tau"})
+        self.assertEqual(
+            {
+                (arc.source.name, arc.target.name)
+                for arc in projected_net.arcs
+            },
+            {("tau", "sink")},
+        )
+
+    def test_compute_simplicity_gain_uses_local_activity_restriction(self):
         net = _build_net(
             "item",
             places=["source", "mid", "sink"],
@@ -1222,7 +1253,7 @@ class SubprocessDetectionTests(unittest.TestCase):
             component={"activities": ("a",)},
         )
 
-        self.assertAlmostEqual(simplicity_gain, 0.8)
+        self.assertAlmostEqual(simplicity_gain, 0.6)
 
     def test_compute_simplicity_gain_collapses_subprocess_candidates_before_pruning(self):
         net = _build_net(
@@ -1265,7 +1296,7 @@ class SubprocessDetectionTests(unittest.TestCase):
             },
         )
 
-        self.assertAlmostEqual(simplicity_gain, 1 / 3)
+        self.assertAlmostEqual(simplicity_gain, 1.0)
 
     def test_select_best_pruning_candidate_greedily_expands_single_best_positive_candidate(self):
         candidates = [

@@ -40,25 +40,20 @@ class TimeRelationScorer(Scorable, ResourceIndicator):
                         h_temporal_relations[pair].setdefault(TR_TOTAL, 0)
                         h_temporal_relations[pair][TR_TOTAL] += 1
 
-                        if (
-                                o_min_times[target_obj]
-                                <= o_min_times[source_obj]
-                                <= o_max_times[source_obj]
-                                <= o_max_times[target_obj]
+                        if _contains_lifespan(
+                            o_min_times[source_obj],
+                            o_max_times[source_obj],
+                            o_min_times[target_obj],
+                            o_max_times[target_obj],
                         ):
                             h_temporal_relations[pair].setdefault(TR_DEPENDENT, 0)
                             h_temporal_relations[pair][TR_DEPENDENT] += 1
 
-                        if (
-                                o_min_times[source_obj]
-                                <= o_max_times[source_obj]
-                                <= o_min_times[target_obj]
-                                <= o_max_times[target_obj]
-                        ) or (
-                                o_min_times[source_obj]
-                                < o_min_times[target_obj]
-                                <= o_max_times[source_obj]
-                                < o_max_times[target_obj]
+                        if _has_temporal_handover(
+                            o_min_times[source_obj],
+                            o_max_times[source_obj],
+                            o_min_times[target_obj],
+                            o_max_times[target_obj],
                         ):
                             h_temporal_relations[pair].setdefault(TR_INITIATING, 0)
                             h_temporal_relations[pair][TR_INITIATING] += 1
@@ -67,14 +62,12 @@ class TimeRelationScorer(Scorable, ResourceIndicator):
 
     def assign_score_pull(self, o_1, o_2) -> float:
         temp_r = self.temporal_relations[o_1, o_2]
-        temp_r_reverse = self.temporal_relations[o_2, o_1]
         if "total" not in temp_r or temp_r["total"] == 0:
             return 0
 
         temp_r.setdefault("I", 0)
-        temp_r_reverse.setdefault("I", 0)
 
-        return (temp_r_reverse["I"] + temp_r["I"]) / temp_r["total"]
+        return temp_r["I"] / temp_r["total"]
 
     def assign_score_push(self, o_1, o_2) -> float:
         temp_r = self.temporal_relations[o_1, o_2]
@@ -85,10 +78,32 @@ class TimeRelationScorer(Scorable, ResourceIndicator):
         temp_r.setdefault("D", 0)
         temp_r_reverse.setdefault("D", 0)
 
-        return (temp_r_reverse["D"] - temp_r["D"]) / temp_r["total"]
+        return (temp_r["D"] - temp_r_reverse["D"]) / temp_r["total"]
 
     def score(self, source_type: str, target_type: str) -> ResourceForces:
         return ResourceForces(
             push=self.assign_score_push(source_type, target_type),
             pull=self.assign_score_pull(source_type, target_type),
         )
+
+
+def _has_temporal_handover(source_min, source_max, target_min, target_max):
+    overlaps = source_min <= target_max and target_min <= source_max
+    if not overlaps:
+        return False
+
+    return not _contains_lifespan(
+        source_min,
+        source_max,
+        target_min,
+        target_max,
+    ) and not _contains_lifespan(
+        target_min,
+        target_max,
+        source_min,
+        source_max,
+    )
+
+
+def _contains_lifespan(container_min, container_max, contained_min, contained_max):
+    return container_min <= contained_min <= contained_max <= container_max
